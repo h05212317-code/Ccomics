@@ -462,7 +462,9 @@ public final class Main extends Activity {
           rep = b;
           break;
         }
-      covers.add(new CoverItem(rep, rep.series, group.size() + "권" + (rep.fav ? "  ·  즐겨찾기" : "")));
+      covers.add(
+          new CoverItem(
+              rep, shelfTitle(rep.series), group.size() + "권" + (rep.fav ? "  ·  즐겨찾기" : "")));
     }
     coverGrid(pane, covers, false);
   }
@@ -578,9 +580,13 @@ public final class Main extends Activity {
         });
   }
 
+  String shelfTitle(String title) {
+    return Order.shelfTitle(title, prefs.getBoolean("hideVolumeTags", true));
+  }
+
   void detailPane(LinearLayout pane) {
     List<Library.Book> volumes = groups.get(selected);
-    String name = volumes.get(0).series;
+    String name = shelfTitle(volumes.get(0).series);
     LinearLayout title = row();
     pad(title, 16, 10);
     pane.addView(title);
@@ -600,7 +606,7 @@ public final class Main extends Activity {
                       : b.opened > 0
                           ? (b.page + 1) + " / " + b.pages + "쪽"
                           : b.pages > 0 ? b.pages + "쪽" : "색인 대기";
-      covers.add(new CoverItem(b, b.title, status));
+      covers.add(new CoverItem(b, shelfTitle(b.title), status));
     }
     coverGrid(pane, covers, true);
   }
@@ -763,7 +769,15 @@ public final class Main extends Activity {
   void settings() {
     choices(
         "서재 설정",
-        new String[] {"연결 폴더 다시 읽기", "책장 관리", "표지 크기", "화면 테마", "임시 파일 정리", "앱 업데이트 확인"},
+        new String[] {
+          "연결 폴더 다시 읽기",
+          "책장 관리",
+          "표지 크기",
+          "화면 테마",
+          "임시 파일 정리",
+          "앱 업데이트 확인",
+          "권 뒤 파일 표기 숨기기 · " + (prefs.getBoolean("hideVolumeTags", true) ? "켜짐" : "꺼짐")
+        },
         i -> {
           if (i == 0) refreshSources(false);
           if (i == 1) shelves();
@@ -771,6 +785,12 @@ public final class Main extends Activity {
           if (i == 3)
             pick("화면 테마", "theme", new String[] {"기기 설정", "밝게", "어둡게"}, () -> library(true));
           if (i == 5) updates.check(true);
+          if (i == 6) {
+            boolean hide = !prefs.getBoolean("hideVolumeTags", true);
+            prefs.edit().putBoolean("hideVolumeTags", hide).apply();
+            library(true);
+            toast(hide ? "권 뒤 파일 표기를 숨깁니다." : "권 뒤 파일 표기를 표시합니다.");
+          }
           if (i == 4) {
             worker.execute(
                 () -> {

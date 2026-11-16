@@ -38,6 +38,16 @@ public class OrderTest {
   }
 
   @Test
+  public void hideOnlyFileTagsFollowingVolumeNumbers() {
+    String name = "[개정판] 하늘 2권 (원본) [1500PX]";
+    assertEquals("[개정판] 하늘 2권", Order.shelfTitle(name, true));
+    assertEquals(name, Order.shelfTitle(name, false));
+    assertEquals("하늘_02권", Order.shelfTitle("하늘_02권_원본_1500px", true));
+    assertEquals("하늘 (원본)", Order.shelfTitle("하늘 (원본)", true));
+    assertEquals("하늘 2권 [외전]", Order.shelfTitle("하늘 2권 [외전]", true));
+  }
+
+  @Test
   public void everyPageOccursOnce() {
     for (int count = 1; count < 45; count++)
       for (boolean split : new boolean[] {false, true})

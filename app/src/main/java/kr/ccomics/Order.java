@@ -53,6 +53,14 @@ final class Order {
     return new Volume(name, -1);
   }
 
+  static String shelfTitle(String title, boolean hideTags) {
+    if (!hideTags) return title;
+    Matcher tags = TAGS.matcher(title.replace('_', ' ').trim());
+    if (!tags.find()) return title;
+    String shortTitle = title.trim().substring(0, tags.start()).trim();
+    return volume(shortTitle).number >= 0 ? shortTitle : title;
+  }
+
   static String series(String filename) {
     Volume v = volume(filename);
     return v.title.isEmpty() ? stem(filename) : v.title;
