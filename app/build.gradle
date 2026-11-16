@@ -1,0 +1,23 @@
+plugins { id 'com.android.application' version '8.7.3' }
+android {
+    namespace 'kr.ccomics'
+    compileSdk 35
+    defaultConfig { applicationId 'kr.ccomics'; minSdk 28; targetSdk 35; versionCode 5; versionName '1.0.4' }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
+    testOptions {
+        unitTests.includeAndroidResources = true
+        unitTests.all { systemProperty 'robolectric.dependency.repo.url', 'https://repo.maven.apache.org/maven2' }
+    }
+    packaging {
+        resources.excludes += ['META-INF/versions/**','META-INF/*.SF','META-INF/*.RSA','META-INF/*.DSA']
+        resources.merges += ['META-INF/DEPENDENCIES','META-INF/LICENSE*','META-INF/NOTICE*']
+    }
+}
+dependencies {
+    implementation 'androidx.core:core:1.13.1'
+    implementation 'org.apache.commons:commons-compress:1.26.2'
+    implementation 'eu.agno3.jcifs:jcifs-ng:2.1.10'
+    implementation 'org.slf4j:slf4j-nop:1.7.36'
+    testImplementation 'org.robolectric:robolectric:4.16.1'
+    testImplementation 'junit:junit:4.13.2'
+}

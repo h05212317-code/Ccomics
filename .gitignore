@@ -1,0 +1,10 @@
+/.gradle/
+/local.properties
+/app/build/
+/build/
+/Ccomics.apk.idsig
+
+/Ccomics.apk
+*.jks
+*.keystore
+*.p12
