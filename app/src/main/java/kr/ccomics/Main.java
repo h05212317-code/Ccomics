@@ -11,6 +11,7 @@ import android.text.*;
 import android.util.LruCache;
 import android.view.*;
 import android.widget.*;
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 import java.io.*;
 import java.util.*;
 import java.util.concurrent.*;
@@ -354,7 +355,18 @@ public final class Main extends Activity {
     body.setGravity(Gravity.TOP);
     root.addView(body, new LinearLayout.LayoutParams(-1, 0, 1));
     LinearLayout pane = col();
-    body.addView(pane, -1, -1);
+    SwipeRefreshLayout pull = new SwipeRefreshLayout(this);
+    body.addView(pull, -1, -1);
+    pull.addView(pane, -1, -1);
+    pull.setColorSchemeColors(accent);
+    pull.setProgressBackgroundColorSchemeColor(surface);
+    pull.setOnChildScrollUpCallback(
+        (parent, child) -> grid != null && grid.canScrollVertically(-1));
+    pull.setOnRefreshListener(
+        () -> {
+          if (!refreshSources(true)) pull.setRefreshing(false);
+        });
+    pull.setRefreshing(!scanning.isEmpty());
     if (selected.isEmpty()) libraryPane(pane);
     else detailPane(pane);
   }
@@ -699,13 +711,31 @@ public final class Main extends Activity {
         if (!isDestroyed() && reader == null) library(true);
       };
 
+  final Set<Long> scanning = new HashSet<>();
+
+  boolean refreshSources(boolean pulled) {
+    if (!scanning.isEmpty()) return false;
+    List<Long> ids = new ArrayList<>();
+    for (String s : db.strings("SELECT id FROM sources")) ids.add(Long.valueOf(s));
+    if (ids.isEmpty()) {
+      if (pulled) toast("연결된 폴더가 없습니다.");
+      else addMenu();
+      return false;
+    }
+    scan(ids);
+    return true;
+  }
+
   void scan(List<Long> ids) {
+    List<Long> batch = new ArrayList<>();
+    for (long id : ids) if (scanning.add(id)) batch.add(id);
+    if (batch.isEmpty()) return;
     scanMessage = "책과 표지를 확인하고 있습니다…";
     library(true);
     worker.execute(
         () -> {
           ArrayList<String> problems = new ArrayList<>();
-          for (long id : ids)
+          for (long id : batch)
             try {
               db.scan(
                   id,
@@ -719,7 +749,8 @@ public final class Main extends Activity {
           runOnUiThread(
               () -> {
                 if (isDestroyed()) return;
-                scanMessage = "";
+                scanning.removeAll(batch);
+                if (scanning.isEmpty()) scanMessage = "";
                 library(true);
                 if (!problems.isEmpty()) alert("폴더를 읽을 수 없습니다", TextUtils.join("\n", problems));
               });
@@ -731,12 +762,7 @@ public final class Main extends Activity {
         "서재 설정",
         new String[] {"연결 폴더 다시 읽기", "책장 관리", "표지 크기", "화면 테마", "임시 파일 정리", "앱 업데이트 확인"},
         i -> {
-          if (i == 0) {
-            List<Long> ids = new ArrayList<>();
-            for (String s : db.strings("SELECT id FROM sources")) ids.add(Long.valueOf(s));
-            if (ids.isEmpty()) addMenu();
-            else scan(ids);
-          }
+          if (i == 0) refreshSources(false);
           if (i == 1) shelves();
           if (i == 2) pick("표지 크기", "size", new String[] {"작게", "기본", "크게"}, () -> library(true));
           if (i == 3)
