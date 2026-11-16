@@ -177,15 +177,26 @@ public class ReaderFrameTest {
     host.frame = new android.widget.FrameLayout(host);
     host.toggleReaderMenu();
     android.view.ViewGroup bar = (android.view.ViewGroup) host.seek.getParent();
-    int width = 1000, height = 220;
+    assertSame(host.overlay, bar);
+    assertEquals(host.indicator, bar.getChildAt(0));
+    assertEquals(host.seek, bar.getChildAt(1));
+    assertEquals("책갈피", ((android.widget.TextView) bar.getChildAt(2)).getText());
+    assertEquals("보기 설정", ((android.widget.TextView) bar.getChildAt(3)).getText());
+    assertEquals(
+        0,
+        host.getWindow().getDecorView().getSystemUiVisibility()
+            & android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
+    int width = host.dp(320), height = host.dp(60);
     bar.measure(
         android.view.View.MeasureSpec.makeMeasureSpec(width, 1073741824),
         android.view.View.MeasureSpec.makeMeasureSpec(height, 1073741824));
     bar.layout(0, 0, width, height);
+    assertTrue(host.seek.getWidth() >= host.dp(48));
     for (boolean rtl : new boolean[] {true, false}) {
       reader.rtl = rtl;
       host.readerStatus();
-      float x = bar.getWidth() * .2f, y = host.seek.getTop() + host.seek.getHeight() / 2f;
+      float x = host.seek.getLeft() + host.seek.getWidth() * .2f,
+          y = host.seek.getTop() + host.seek.getHeight() / 2f;
       long t = android.os.SystemClock.uptimeMillis();
       for (int action : new int[] {0, 1}) {
         android.view.MotionEvent e =
@@ -195,6 +206,26 @@ public class ReaderFrameTest {
       }
       assertEquals(rtl, reader.page > reader.count() / 2);
     }
+    android.view.WindowInsets insets =
+        new android.view.WindowInsets.Builder()
+            .setInsets(
+                android.view.WindowInsets.Type.statusBars(),
+                android.graphics.Insets.of(0, 24, 0, 0))
+            .setInsets(
+                android.view.WindowInsets.Type.navigationBars(),
+                android.graphics.Insets.of(0, 0, 0, 52))
+            .setVisible(android.view.WindowInsets.Type.systemBars(), true)
+            .build();
+    bar.dispatchApplyWindowInsets(insets);
+    host.topBar.dispatchApplyWindowInsets(insets);
+    assertEquals(host.dp(2) + 52, bar.getPaddingBottom());
+    assertEquals(host.dp(2) + 24, host.topBar.getPaddingTop());
+    host.toggleReaderMenu();
+    assertNull(host.overlay);
+    assertNotEquals(
+        0,
+        host.getWindow().getDecorView().getSystemUiVisibility()
+            & android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
   }
 
   @Test

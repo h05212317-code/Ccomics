@@ -11,6 +11,9 @@ import android.text.*;
 import android.util.LruCache;
 import android.view.*;
 import android.widget.*;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 import java.io.*;
 import java.util.*;
@@ -1068,8 +1071,36 @@ public final class Main extends Activity {
         });
   }
 
+  static final int READER_LAYOUT =
+      View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+          | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+
+  void insetMenu(View bar, boolean top) {
+    int edge = bar.getPaddingLeft(), vertical = bar.getPaddingTop();
+    ViewCompat.setOnApplyWindowInsetsListener(
+        bar,
+        (view, windowInsets) -> {
+          Insets safe =
+              windowInsets.getInsets(
+                  WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+          view.setPadding(
+              edge + safe.left,
+              vertical + (top ? safe.top : 0),
+              edge + safe.right,
+              vertical + (top ? 0 : safe.bottom));
+          return windowInsets;
+        });
+  }
+
   void immersive() {
-    getWindow().getDecorView().setSystemUiVisibility(5894);
+    getWindow()
+        .getDecorView()
+        .setSystemUiVisibility(
+            READER_LAYOUT
+                | View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
   }
 
   void toggleReaderMenu() {
@@ -1094,37 +1125,52 @@ public final class Main extends Activity {
     top.addView(directionButton);
     icon(top, "more", "읽기 설정", fg, this::readerSettings);
     topBar = top;
-    frame.addView(top, new FrameLayout.LayoutParams(-1, dp(55), Gravity.TOP));
-    LinearLayout bottom = col();
-    pad(bottom, 15, 9);
+    insetMenu(top, true);
+    frame.addView(top, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
+    LinearLayout bottom = row();
+    bottom.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);
+    pad(bottom, 8, 2);
     bottom.setBackgroundColor(0xee202421);
-    LinearLayout tools = row();
-    bottom.addView(tools);
-    indicator = label("", 14, fg, true);
-    weight(tools, indicator);
+    indicator = label("", 13, fg, true);
+    indicator.setSingleLine();
+    bottom.addView(indicator);
+    seek = new SeekBar(this);
+    seek.setContentDescription("페이지 탐색");
+    seek.setMax(reader.count() - 1);
+    bottom.addView(seek, new LinearLayout.LayoutParams(0, dp(48), 1));
     TextView mark = action("책갈피", this::marks);
     mark.setTextColor(fg);
-    tools.addView(mark);
+    pad(mark, 6, 8);
+    mark.setMinWidth(dp(48));
+    bottom.addView(mark);
     TextView opt = action("보기 설정", this::readerSettings);
     opt.setTextColor(fg);
-    tools.addView(opt);
-    seek = new SeekBar(this);
-    seek.setMax(reader.count() - 1);
-    bottom.addView(seek, -1, dp(38));
+    pad(opt, 6, 8);
+    bottom.addView(opt);
     seek.setOnSeekBarChangeListener(
         new SeekBar.OnSeekBarChangeListener() {
-          public void onStartTrackingTouch(SeekBar s) {}
+          public void onStartTrackingTouch(SeekBar s) {
+            indicator.setWidth(indicator.getWidth());
+          }
 
           public void onStopTrackingTouch(SeekBar s) {
+            indicator.setMinWidth(0);
+            indicator.setMaxWidth(Integer.MAX_VALUE);
             if (reader != null) reader.seek(s.getProgress());
+            readerStatus();
           }
 
           public void onProgressChanged(SeekBar s, int p, boolean user) {
             if (user && reader != null) indicator.setText((p + 1) + " / " + reader.count());
           }
         });
+    insetMenu(bottom, false);
     overlay = bottom;
     frame.addView(bottom, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
+    getWindow().setStatusBarColor(0xff202421);
+    getWindow().setNavigationBarColor(0xff202421);
+    getWindow().getDecorView().setSystemUiVisibility(READER_LAYOUT);
+    ViewCompat.requestApplyInsets(frame);
     readerStatus();
   }
 
@@ -1138,7 +1184,7 @@ public final class Main extends Activity {
         range
             + " / "
             + reader.count()
-            + "   ·   "
+            + " · "
             + Math.round(100f * (s[s.length - 1] + 1) / reader.count())
             + "%");
     seek.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);
