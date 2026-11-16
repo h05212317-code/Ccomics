@@ -26,13 +26,13 @@ final class Reader extends View {
   final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
   final GestureDetector immediateTaps, centerDoubleTaps;
   GestureDetector activeTaps;
-  boolean doubleZoom, pinchZoom, tapTurn, swipeTurn, tapAnimation, brightnessGesture;
+  boolean doubleZoom, pinchZoom, tapTurn, swipeTurn, brightnessGesture;
   boolean brightnessDrag, skipTouch, tapStartedTurn;
   float edge, initialBrightness;
   final float previousWindowBrightness;
   final ScaleGestureDetector pinch;
   final OverScroller fling;
-  int page, target = -1, turn, side, mode, effect, fit;
+  int page, target = -1, turn, side, mode, effect, tapEffect = 2, fit;
   boolean rtl, solo, closed, drag, pinched;
   float downX, downY, lastY, progress, tilt, zoom = 1, panX, panY, scrollY;
   ValueAnimator animator;
@@ -170,7 +170,7 @@ final class Reader extends View {
     pinchZoom = host.prefs.getBoolean("pinchZoom", true);
     tapTurn = host.prefs.getBoolean("tapTurn", true);
     swipeTurn = host.prefs.getBoolean("swipeTurn", true);
-    tapAnimation = host.prefs.getBoolean("tapAnimation", true);
+    tapEffect = host.prefs.getInt("tapEffect", 2);
     brightnessGesture = host.prefs.getBoolean("brightnessGesture", false);
     edge = new float[] {.25f, .33f, .4f}[host.prefs.getInt("tapWidth", 1)];
     if (!pinchZoom && !doubleZoom && zoom > 1) {
@@ -383,8 +383,8 @@ final class Reader extends View {
     c.translate(panX, panY);
     c.scale(zoom, zoom, getWidth() / 2f, getHeight() / 2f);
     if (mode == 3) continuous(c);
-    else if (target < 0 || progress <= 0 || effect == 2 || !turnReady()) sheet(c, page);
-    else if (effect == 1) {
+    else if (target < 0 || progress <= 0 || activeEffect() == 2 || !turnReady()) sheet(c, page);
+    else if (activeEffect() == 1) {
       float dx = -side * progress * getWidth();
       c.save();
       c.translate(dx, 0);
@@ -798,6 +798,10 @@ final class Reader extends View {
     }
   }
 
+  int activeEffect() {
+    return tapStartedTurn ? tapEffect : effect;
+  }
+
   void settle(boolean commit) {
     if (!turnReady()) {
       if (!commit) {
@@ -809,7 +813,7 @@ final class Reader extends View {
       invalidate();
       return;
     }
-    if (effect == 2 || tapStartedTurn && !tapAnimation) {
+    if (activeEffect() == 2) {
       finish(commit);
       return;
     }

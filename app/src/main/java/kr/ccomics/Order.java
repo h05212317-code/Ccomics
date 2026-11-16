@@ -12,10 +12,56 @@ final class Order {
     return s.replaceFirst("(?i)\\.(zip|cbz)$", "");
   }
 
-  static String series(String filename) {
+  static String legacySeries(String filename) {
     String title = stem(filename);
     Matcher match = VOLUME.matcher(title);
     return match.matches() ? match.group(1).trim() : title;
+  }
+
+  private static final String TAG =
+      "(?:원본|정발(?:본)?|(?:AI\\s*)?번역(?:본)?|완결|완|스캔본|전자책|\\d{3,5}\\s*px)";
+  private static final Pattern TAGS =
+      Pattern.compile(
+          "(?iu)(?:\\s*(?:\\[\\s*" + TAG + "\\s*\\]|\\(\\s*" + TAG + "\\s*\\))|\\s+" + TAG + ")+$");
+  private static final Pattern NUMBER =
+      Pattern.compile(
+          "(?iu)(?:[\\s.\\-]*(?:제|第)?\\s*(\\d{1,4})\\s*[권巻]|[\\s.\\-]*vol(?:ume)?\\.?\\s*(\\d{1,4})|(?:^|[\\s.\\-]+)(\\d{1,3})|\\s*[\\[(](?:제|第)?\\s*(\\d{1,4})\\s*[권巻]?[\\])])$");
+
+  static class Volume {
+    final String title;
+    final int number;
+
+    Volume(String title, int number) {
+      this.title = title;
+      this.number = number;
+    }
+  }
+
+  static Volume volume(String filename) {
+    String name =
+        java.text.Normalizer.normalize(stem(filename), java.text.Normalizer.Form.NFKC)
+            .replace('_', ' ')
+            .trim()
+            .replaceAll("\\s+", " ");
+    String clean = TAGS.matcher(name).replaceFirst("").trim();
+    Matcher m = NUMBER.matcher(clean);
+    if (m.find()) {
+      for (int i = 1; i <= m.groupCount(); i++)
+        if (m.group(i) != null)
+          return new Volume(clean.substring(0, m.start()).trim(), Integer.parseInt(m.group(i)));
+    }
+    return new Volume(name, -1);
+  }
+
+  static String series(String filename) {
+    Volume v = volume(filename);
+    return v.title.isEmpty() ? stem(filename) : v.title;
+  }
+
+  static int compareVolumes(String a, String b) {
+    int x = volume(a).number, y = volume(b).number;
+    int n = Integer.compare(x < 0 ? Integer.MAX_VALUE : x, y < 0 ? Integer.MAX_VALUE : y);
+    return n == 0 ? natural(a, b) : n;
   }
 
   static int natural(String a, String b) {

@@ -2,7 +2,7 @@ plugins { id 'com.android.application' version '8.7.3' }
 android {
     namespace 'kr.ccomics'
     compileSdk 35
-    defaultConfig { applicationId 'kr.ccomics'; minSdk 28; targetSdk 35; versionCode 6; versionName '1.0.5' }
+    defaultConfig { applicationId 'kr.ccomics'; minSdk 28; targetSdk 35; versionCode 7; versionName '1.0.6' }
     compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
     testOptions {
         unitTests.includeAndroidResources = true

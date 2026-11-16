@@ -29,6 +29,11 @@ public class OrderTest {
   public void volumeNames() {
     assertEquals("하늘", Order.series("하늘 02권.zip"));
     assertEquals("Atlas", Order.series("Atlas 10.cbz"));
+    assertEquals("하늘 길", Order.series("하늘_길_제３권_완결_원본_1500px.zip"));
+    assertEquals("하늘 길", Order.series("하늘 길 2권 (AI번역)[1500PX].zip"));
+    assertEquals("[개정판] 하늘", Order.series("[개정판] 하늘 1권.zip"));
+    assertEquals("하늘 2099", Order.series("하늘 2099.zip"));
+    assertTrue(Order.compareVolumes("하늘 Vol.2", "하늘 11권 [원본]") < 0);
     assertEquals("AKIRA", Order.series("AKIRA.zip"));
   }
 

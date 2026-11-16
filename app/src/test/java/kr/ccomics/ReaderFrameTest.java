@@ -79,7 +79,8 @@ public class ReaderFrameTest {
   @Test
   public void rapidEdgeTapsAdvanceOnReleaseInBothDirections() {
     reader.mode = 1;
-    reader.effect = 2;
+    assertEquals(0, reader.effect);
+    assertEquals(2, reader.tapEffect);
     draw();
     decode(0);
     decode(1);
@@ -266,6 +267,7 @@ public class ReaderFrameTest {
     reader.mode = mode;
     reader.rtl = rtl;
     reader.effect = effect;
+    reader.tapEffect = effect;
     draw();
     for (int i : reader.spread(0)) decode(i);
     assertVisible(0);

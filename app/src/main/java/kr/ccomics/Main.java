@@ -243,7 +243,7 @@ public final class Main extends Activity {
           Map<String, List<Library.Book>> sorted = new LinkedHashMap<>();
           for (Library.Book b : all) sorted.computeIfAbsent(b.grp, k -> new ArrayList<>()).add(b);
           for (List<Library.Book> group : sorted.values())
-            group.sort((a, b) -> Order.natural(a.title, b.title));
+            group.sort((a, b) -> Order.compareVolumes(a.title, b.title));
           runOnUiThread(
               () -> {
                 if (isDestroyed() || token != snapshotId) return;
@@ -603,7 +603,7 @@ public final class Main extends Activity {
   }
 
   void pick(String title, String key, String[] labels, Runnable after) {
-    int def = key.equals("size") ? 1 : 0;
+    int def = key.equals("size") ? 1 : key.equals("tapEffect") ? 2 : 0;
     dialog()
         .setTitle(title)
         .setSingleChoiceItems(
@@ -882,7 +882,7 @@ public final class Main extends Activity {
                 b.series,
                 s -> {
                   if (!s.isEmpty()) {
-                    db.exec("UPDATE books SET series=? WHERE grp=?", s, b.grp);
+                    db.exec("UPDATE books SET manualGroup=1,series=? WHERE grp=?", s, b.grp);
                     library(true);
                   }
                 });
@@ -902,8 +902,9 @@ public final class Main extends Activity {
                 names,
                 k -> {
                   Library.Book dest = groups.get(keys.get(k)).get(0);
+                  db.exec("UPDATE books SET manualGroup=1 WHERE grp=?", dest.grp);
                   db.exec(
-                      "UPDATE books SET grp=?,series=?,shelf=?,rep=0 WHERE grp=?",
+                      "UPDATE books SET manualGroup=1,grp=?,series=?,shelf=?,rep=0 WHERE grp=?",
                       dest.grp,
                       dest.series,
                       dest.shelf,
@@ -914,7 +915,10 @@ public final class Main extends Activity {
             return;
           }
           if (i == 7) {
-            db.exec("UPDATE books SET grp=?,series=title,rep=0 WHERE id=?", "manual:" + b.id, b.id);
+            db.exec(
+                "UPDATE books SET manualGroup=1,grp=?,series=title,rep=0 WHERE id=?",
+                "manual:" + b.id,
+                b.id);
             selected = "manual:" + b.id;
           }
           library(true);
@@ -1203,9 +1207,7 @@ public final class Main extends Activity {
                 new String[] {"화면에 맞춰 자동", "한 쪽", "양면", "세로 연속"},
                 reader::optionsChanged);
           if (i == 1) pickDirection();
-          if (i == 2)
-            pick(
-                "넘김 효과", "effect", new String[] {"종이 넘김", "슬라이드", "즉시 전환"}, reader::optionsChanged);
+          if (i == 2) turnEffects();
           if (i == 3)
             pick("이미지 맞춤", "fit", new String[] {"화면 맞춤", "너비 맞춤", "높이 맞춤"}, reader::optionsChanged);
           if (i == 4) {
@@ -1243,6 +1245,18 @@ public final class Main extends Activity {
     return count;
   }
 
+  void turnEffects() {
+    choices(
+        "페이지 넘김 효과",
+        new String[] {"드래그로 넘길 때", "탭으로 넘길 때"},
+        i ->
+            pick(
+                i == 0 ? "드래그로 넘길 때" : "탭으로 넘길 때",
+                i == 0 ? "effect" : "tapEffect",
+                new String[] {"종이 넘김", "슬라이드", "즉시 전환"},
+                reader::optionsChanged));
+  }
+
   void gestureSettings() {
     AlertDialog.Builder builder = dialog();
     ScrollView scroll = new ScrollView(builder.getContext());
@@ -1250,7 +1264,7 @@ public final class Main extends Activity {
     pad(box, 20, 4);
     scroll.addView(box);
     addGestureSwitch(box, "좌우 탭으로 페이지 넘기기", "tapTurn", true);
-    addGestureSwitch(box, "탭으로 넘길 때 애니메이션", "tapAnimation", true);
+    box.addView(action("페이지 넘김 효과 설정", this::turnEffects));
     addGestureSwitch(box, "좌우 스와이프로 페이지 넘기기", "swipeTurn", true);
     addGestureSwitch(box, "가운데 더블 탭으로 확대·축소", "doubleZoom", false);
     addGestureSwitch(box, "두 손가락으로 확대·축소", "pinchZoom", true);

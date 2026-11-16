@@ -21,7 +21,7 @@ final class Library extends SQLiteOpenHelper {
   final File covers;
 
   Library(Context c) {
-    super(c, "library.db", null, 2);
+    super(c, "library.db", null, 3);
     ctx = c;
     setWriteAheadLoggingEnabled(true);
     covers = new File(c.getFilesDir(), "covers");
@@ -38,12 +38,14 @@ final class Library extends SQLiteOpenHelper {
             + " 0,opened INTEGER DEFAULT 0,done INTEGER DEFAULT 0,fav INTEGER DEFAULT 0,cover TEXT"
             + " DEFAULT '',rep INTEGER DEFAULT 0,error TEXT DEFAULT '')");
     db.execSQL("ALTER TABLE books ADD COLUMN fingerprint TEXT DEFAULT ''");
+    db.execSQL("ALTER TABLE books ADD COLUMN manualGroup INTEGER DEFAULT 0");
     db.execSQL("CREATE INDEX series_index ON books(grp)");
     db.execSQL("CREATE TABLE shelves(name TEXT PRIMARY KEY)");
     db.execSQL("CREATE TABLE marks(book INTEGER,page INTEGER,PRIMARY KEY(book,page))");
   }
 
   public void onUpgrade(SQLiteDatabase db, int from, int to) {
+    if (from < 3) db.execSQL("ALTER TABLE books ADD COLUMN manualGroup INTEGER DEFAULT -1");
     if (from < 2) db.execSQL("ALTER TABLE books ADD COLUMN fingerprint TEXT DEFAULT ''");
   }
 
@@ -82,7 +84,7 @@ final class Library extends SQLiteOpenHelper {
 
   List<Book> books() {
     List<Book> r = new ArrayList<>();
-    try (Cursor c = getReadableDatabase().rawQuery(SELECT, null)) {
+    try (Cursor c = getReadableDatabase().rawQuery(SELECT + " WHERE missing=0", null)) {
       while (c.moveToNext()) r.add(new Book(c));
     }
     return r;
@@ -249,6 +251,8 @@ final class Library extends SQLiteOpenHelper {
         Uri listing = tree ? DocumentsContract.buildChildDocumentsUriUsingTree(uri, parent) : uri;
         try (Cursor c = ctx.getContentResolver().query(listing, fields, null, null, null)) {
           if (c == null) throw new IOException("폴더 목록을 읽을 수 없습니다.");
+          if (c.getExtras().containsKey(DocumentsContract.EXTRA_ERROR))
+            throw new IOException("저장소에서 목록을 읽지 못했습니다.");
           if (c.getExtras().getBoolean(DocumentsContract.EXTRA_LOADING))
             throw new IOException("파일 공급자가 목록을 준비하고 있습니다. 다시 갱신하세요.");
           while (c.moveToNext()) {
@@ -351,7 +355,7 @@ final class Library extends SQLiteOpenHelper {
       List<Long> pending) {
     if (filename == null || !filename.toLowerCase(Locale.ROOT).matches("(?s).*\\.(cbz|zip)$"))
       return;
-    String title = Order.stem(filename), series = Order.series(filename);
+    String title = Order.stem(filename), series = Order.legacySeries(filename);
     if (series.isEmpty()) series = title;
     String group = parent + "\n" + series;
     if (parent.equals("single")) group = "single\n" + series;
@@ -362,19 +366,40 @@ final class Library extends SQLiteOpenHelper {
         group = parent + "\n" + series;
       }
     }
+    String legacyGroup = group, legacySeries = series;
+    Order.Volume volume = Order.volume(filename);
+    if (!volume.title.isEmpty()) series = volume.title;
+    else if (!parent.equals("single"))
+      series = Uri.decode(parent).replaceAll("/+$", "").replaceFirst("^.*[:/]", "");
+    else series = title;
+    group =
+        volume.number >= 0 && !volume.title.isEmpty()
+            ? "series:" + series.toLowerCase(Locale.ROOT).replace(" ", "")
+            : parent + "\n" + series;
     try (Cursor c =
         getReadableDatabase()
             .rawQuery(
-                "SELECT id,size,changed,pages,error FROM books WHERE url=?", new String[] {url})) {
+                "SELECT id,size,changed,pages,error,grp,series,manualGroup FROM books WHERE url=?",
+                new String[] {url})) {
       if (c.moveToFirst()) {
         long id = c.getLong(0);
+        int manual = c.getInt(7);
+        String oldGroup = c.getString(5);
+        if (manual == -1)
+          manual = legacyGroup.equals(oldGroup) && legacySeries.equals(c.getString(6)) ? 0 : 1;
+        if (manual == 0 && (!group.equals(oldGroup) || !series.equals(c.getString(6)))) {
+          copySeriesOptions(oldGroup, group);
+          exec("UPDATE books SET grp=?,series=? WHERE id=?", group, series, id);
+        }
+        if (c.getInt(7) == -1) exec("UPDATE books SET manualGroup=? WHERE id=?", manual, id);
         if (c.getLong(1) != size
             || c.getLong(2) != changed
             || c.getInt(3) == 0
             || !c.getString(4).isEmpty()
             || !coverFile(id).isFile()) pending.add(id);
         exec(
-            "UPDATE books SET size=?,changed=?,seen=?,missing=0 WHERE id=?",
+            "UPDATE books SET title=?,size=?,changed=?,seen=?,missing=0 WHERE id=?",
+            title,
             size,
             changed,
             token,
@@ -383,6 +408,7 @@ final class Library extends SQLiteOpenHelper {
       }
     }
     ContentValues v = new ContentValues();
+    v.put("manualGroup", 0);
     v.put("source", src);
     v.put("url", url);
     v.put("title", title);
@@ -392,6 +418,21 @@ final class Library extends SQLiteOpenHelper {
     v.put("changed", changed);
     v.put("seen", token);
     pending.add(getWritableDatabase().insertOrThrow("books", null, v));
+  }
+
+  void copySeriesOptions(String oldGroup, String group) {
+    SharedPreferences prefs = ctx.getSharedPreferences("options", 0);
+    for (String prefix : new String[] {"solo-", "rtl-"}) {
+      String old =
+          prefix
+              + Base64.encodeToString(
+                  oldGroup.getBytes(java.nio.charset.StandardCharsets.UTF_8), 2);
+      String key =
+          prefix
+              + Base64.encodeToString(group.getBytes(java.nio.charset.StandardCharsets.UTF_8), 2);
+      if (prefs.contains(old) && !prefs.contains(key))
+        prefs.edit().putBoolean(key, prefs.getBoolean(old, false)).apply();
+    }
   }
 
   File coverFile(long id) {
