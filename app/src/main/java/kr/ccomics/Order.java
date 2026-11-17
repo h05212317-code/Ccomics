@@ -172,12 +172,20 @@ final class Order {
         i = e;
         j = f;
       } else {
+        // 파일 관리자와 같은 순서: 기호(_ ! ( - 등) → 숫자 → 글자. 표지를 앞에 두려고 붙인 _.jpg가 첫 장이 된다.
+        int d = rank(x) - rank(y);
+        if (d != 0) return d;
         if (x != y) return x - y;
         i++;
         j++;
       }
     }
     return Integer.compare(a.length() - i, b.length() - j);
+  }
+
+  static int rank(char c) {
+    if (c >= '0' && c <= '9') return 1;
+    return Character.isLetter(c) ? 2 : 0;
   }
 
   static int coverRank(String path) {

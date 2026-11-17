@@ -14,6 +14,21 @@ public class OrderTest {
     assertEquals(
         Arrays.asList("part2/1.jpg", "part2/2.jpg", "part2/10.jpg", "part10/1.jpg"), files);
     assertTrue(Order.natural("9999999999999999999", "10000000000000000000") < 0);
+    List<String> pages =
+        new ArrayList<>(
+            Arrays.asList(
+                "000001.jpg", "a.jpg", "000000.jpg", "_.jpg", "!표지.jpg", "(cover).jpg", "-0.jpg",
+                "001.jpg", "표지.jpg"));
+    pages.sort(Order::natural);
+    assertEquals("!표지.jpg", pages.get(0));
+    assertTrue(pages.indexOf("_.jpg") < pages.indexOf("000000.jpg"));
+    assertTrue(pages.indexOf("(cover).jpg") < pages.indexOf("000000.jpg"));
+    assertTrue(pages.indexOf("-0.jpg") < pages.indexOf("000000.jpg"));
+    assertTrue(pages.indexOf("000001.jpg") < pages.indexOf("a.jpg"));
+    assertEquals("표지.jpg", pages.get(pages.size() - 1));
+    List<String> nested = new ArrayList<>(Arrays.asList("권/000000.jpg", "권/_.jpg", "권/000001.jpg"));
+    nested.sort(Order::natural);
+    assertEquals(Arrays.asList("권/_.jpg", "권/000000.jpg", "권/000001.jpg"), nested);
   }
 
   @Test

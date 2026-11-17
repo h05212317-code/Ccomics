@@ -216,6 +216,10 @@ final class Library extends SQLiteOpenHelper {
     String url = strings("SELECT url FROM sources WHERE id=?", "" + source).get(0);
     long token = System.currentTimeMillis();
     ArrayList<Long> pending = new ArrayList<>();
+    if (ctx.getSharedPreferences("options", 0).getInt("rules-" + source, 0) < 4)
+      // 페이지 정렬 규칙이 바뀌어 첫 장(표지)이 달라질 수 있으므로 표지 썸네일을 한 번 다시 만든다.
+      for (String id : strings("SELECT id FROM books WHERE source=?", "" + source))
+        coverFile(Long.parseLong(id)).delete();
     IndexBatch batch = new IndexBatch(source, token, pending);
     if (url.startsWith("smb://")) {
       CIFSContext smb = session(source);
@@ -314,7 +318,7 @@ final class Library extends SQLiteOpenHelper {
   }
 
   /** 인식 규칙이 바뀐 뒤 한 번, 이미 열리던 책 중 권 ZIP 묶음인 것을 찾아 권별로 나눈다. */
-  static final int RULES = 3;
+  static final int RULES = 4;
 
   void recheckBundles(long source, long token, List<Long> pending) {
     Set<Long> queued = new HashSet<>(pending);
