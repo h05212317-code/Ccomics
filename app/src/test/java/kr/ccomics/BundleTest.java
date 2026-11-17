@@ -76,9 +76,18 @@ public class BundleTest {
     lib.record(1, Archive.nested(outer, "a/3권.zip"), "3권.zip", parent, 10, 1, 7, pending);
     lib.record(1, Archive.nested(outer, "블리치 1권.zip"), "블리치 1권.zip", parent, 10, 1, 7, pending);
     lib.record(1, "content://x/[완결] 블리치 4권.zip", "[완결] 블리치_4권.zip", "p", 10, 1, 7, pending);
+    String other = Library.bundleParent("블리치 (문구)");
+    lib.record(1, Archive.nested("content://y/b.zip", "5권.zip"), "5권.zip", other, 10, 1, 7, pending);
+    lib.record(1, "content://z/블리치 (문구).zip", "블리치 (문구).zip", "q", 10, 1, 7, pending);
+    lib.record(1, "content://z/블리치 6권 (문구).zip", "블리치 6권 (문구).zip", "q", 10, 1, 7, pending);
     Set<String> groups = new HashSet<>();
     for (Library.Book b : lib.books()) groups.add(b.grp);
     assertEquals(Collections.singleton("series:블리치"), groups);
+    lib.record(1, "content://a/외전.zip", "외전.zip", "folderA", 10, 1, 7, pending);
+    lib.record(1, "content://b/외전.zip", "외전.zip", "folderB", 10, 1, 7, pending);
+    groups.clear();
+    for (Library.Book b : lib.books()) groups.add(b.grp);
+    assertEquals(3, groups.size());
     lib.close();
   }
 }

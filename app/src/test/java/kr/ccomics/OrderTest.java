@@ -43,11 +43,39 @@ public class OrderTest {
     assertEquals("하늘 2권", Order.shelfTitle(name, true));
     assertEquals(name, Order.shelfTitle(name, false));
     assertEquals("하늘 02권", Order.shelfTitle("하늘_02권_원본_1500px", true));
-    assertEquals("하늘 (원본)", Order.shelfTitle("하늘 (원본)", true));
+    assertEquals("하늘", Order.shelfTitle("하늘 (원본)", true));
     assertEquals("하늘 2권 [외전]", Order.shelfTitle("하늘 2권 [외전]", true));
+    assertEquals("하늘 2권 [외전]", Order.shelfTitle("하늘 2권 [외전] (아무 문구)", true));
     assertEquals(
         "그 비스크 돌은 사랑을 한다", Order.shelfTitle("[완결]【스캔】 그_비스크_돌은_사랑을_한다", true));
     assertEquals("[완결]", Order.shelfTitle("[완결]", true));
+    for (String s :
+        new String[] {
+          "블리치 (문구)", "블리치 [아무 말]", "블리치 {문구}", "블리치【문구】", "(문구) 블리치",
+          "{문구} 블리치 (또 문구) [1500px]", "블리치_(문구)"
+        }) assertEquals(s, "블리치", Order.shelfTitle(s, true));
+    assertEquals("블리치 3권", Order.shelfTitle("블리치 3권 (문구)", true));
+    assertEquals("블리치 3권", Order.shelfTitle("(문구) 블리치_3권_원본 [고화질]", true));
+  }
+
+  @Test
+  public void anyBracketTextBeforeOrAfterTitleIsIgnored() {
+    String key = Order.seriesKey("블리치");
+    for (String f :
+        new String[] {
+          "블리치.zip", "블리치 (문구).zip", "블리치 [문구].cbz", "블리치 {문구}.zip", "블리치【문구】.zip",
+          "(문구) 블리치.zip", "[문구] 블리치 (문구2).zip", "블리치 3권 (문구).zip", "블리치 (문구) 4권.zip",
+          "(문구) 블리치_5권.zip", "블리치 6권 [원본] (문구) {또}.zip", "블리치_7권_완결_(문구).zip",
+          "블리치 Vol.8 (문구).zip", "블리치 [9권] (문구).zip", "블리치 10 (문구).zip"
+        }) assertEquals(f, key, Order.seriesKey(Order.series(f)));
+    assertEquals(3, Order.volume("블리치 3권 (문구).zip").number);
+    assertEquals(4, Order.volume("블리치 (문구) 4권.zip").number);
+    assertEquals(9, Order.volume("블리치 [9권] (문구).zip").number);
+    assertEquals(10, Order.volume("블리치 10 (문구).zip").number);
+    assertEquals(2, Order.volume("하늘 2권 [외전].zip").number);
+    assertEquals(-1, Order.volume("블리치 (문구).zip").number);
+    assertTrue(Order.genericKey(Order.seriesKey("외전")));
+    assertFalse(Order.genericKey(key));
   }
 
   @Test

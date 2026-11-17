@@ -43,7 +43,11 @@ final class Order {
             .replace('_', ' ')
             .trim()
             .replaceAll("\\s+", " ");
-    String clean = TAGS.matcher(name).replaceFirst("").trim();
+    String clean = name, before;
+    do {
+      before = clean;
+      clean = stripTrailing(TAGS.matcher(clean).replaceFirst("").trim(), false);
+    } while (!clean.equals(before));
     Matcher m = NUMBER.matcher(clean);
     if (m.find()) {
       for (int i = 1; i <= m.groupCount(); i++)
@@ -53,34 +57,76 @@ final class Order {
     return new Volume(name, -1);
   }
 
-  private static final Pattern LEADING_TAGS =
-      Pattern.compile("^(?:\\s*[\\[【][^\\]】]*[\\]】])+\\s*");
+  /** 내용과 상관없이 괄호 한 덩어리: [..] (..) {..} 【..】 */
+  private static final String BRACKET =
+      "(?:\\[[^\\[\\]]*\\]|\\([^()]*\\)|\\{[^{}]*\\}|【[^【】]*】)";
+  private static final Pattern LEADING_TAGS = Pattern.compile("^(?:\\s*" + BRACKET + ")+\\s*");
+  private static final Pattern TRAILING_TAG = Pattern.compile("\\s*(" + BRACKET + ")\\s*$");
+  /** [3권], (03)처럼 권 번호만 담은 괄호는 떼지 않는다. */
+  private static final Pattern VOLUME_BRACKET =
+      Pattern.compile("(?iu)[\\[(](?:제|第)?\\s*\\d{1,4}\\s*[권巻]?[\\])]");
+  /** 화면 표시에서는 본편과 구별되는 문구를 남긴다. */
+  private static final Pattern DISTINCT =
+      Pattern.compile("(?iu).*(?:외전|번외|특별|부록|스핀오프|단편|extra|special|side).*");
   private static final Pattern KEY_SEPARATORS =
       Pattern.compile("[\\s_:;\\-~〜()\\[\\]{}【】.,!?'\"+·♡♥❤☆★\\ufe0f]+");
+  private static final Pattern GENERIC_KEY =
+      Pattern.compile(
+          "(?iu)(?:외전|번외|프롤로그|에필로그|후기|부록|단편|특별편|표지|cover|extra|special|bonus|\\d+)");
 
   static String withoutLeadingTags(String title) {
     String rest = LEADING_TAGS.matcher(title).replaceFirst("").trim();
     return rest.isEmpty() ? title.trim() : rest;
   }
 
-  /** 앞쪽 [문구], 띄어쓰기·밑줄·문장부호 차이를 무시하는 시리즈 비교 키. */
+  /** 뒤쪽 괄호 문구를 차례로 뗀다. keepDistinct면 외전 같은 구별 문구에서 멈춘다. */
+  static String stripTrailing(String title, boolean keepDistinct) {
+    String s = title.trim();
+    while (true) {
+      Matcher m = TRAILING_TAG.matcher(s);
+      if (!m.find() || m.start() == 0) return s;
+      String block = m.group(1);
+      if (VOLUME_BRACKET.matcher(block).matches()) return s;
+      if (keepDistinct && DISTINCT.matcher(block).matches()) return s;
+      s = s.substring(0, m.start()).trim();
+    }
+  }
+
+  /** 앞뒤 괄호 문구, 띄어쓰기·밑줄·문장부호 차이를 무시하는 시리즈 비교 키. */
   static String seriesKey(String series) {
     String name =
         java.text.Normalizer.normalize(series, java.text.Normalizer.Form.NFKC)
             .replace('_', ' ')
+            .replaceAll("\\s+", " ")
+            .trim()
             .toLowerCase(Locale.ROOT);
-    String key = KEY_SEPARATORS.matcher(withoutLeadingTags(name)).replaceAll("");
+    String bare = name, before;
+    do {
+      before = bare;
+      bare = stripTrailing(TAGS.matcher(withoutLeadingTags(bare)).replaceFirst("").trim(), false);
+    } while (!bare.equals(before));
+    String key = KEY_SEPARATORS.matcher(bare).replaceAll("");
     return key.isEmpty() ? name.replace(" ", "") : key;
+  }
+
+  /** 외전·표지처럼 여러 작품에 흔한 이름은 폴더 밖 같은 이름과 묶지 않는다. */
+  static boolean genericKey(String key) {
+    return GENERIC_KEY.matcher(key).matches();
   }
 
   static String shelfTitle(String title, boolean hideTags) {
     if (!hideTags) return title;
     String name = withoutLeadingTags(title.replace('_', ' ').trim().replaceAll("\\s+", " "));
-    Matcher tags = TAGS.matcher(name);
-    if (tags.find()) {
-      String shortTitle = name.substring(0, tags.start()).trim();
-      if (volume(shortTitle).number >= 0) return shortTitle;
-    }
+    String before;
+    do {
+      before = name;
+      name = stripTrailing(name, true);
+      Matcher tags = TAGS.matcher(name);
+      if (tags.find() && tags.start() > 0) {
+        String shortTitle = name.substring(0, tags.start()).trim();
+        if (volume(shortTitle).number >= 0) name = shortTitle;
+      }
+    } while (!name.equals(before));
     return name;
   }
 

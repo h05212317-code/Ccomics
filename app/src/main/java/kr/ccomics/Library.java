@@ -402,10 +402,11 @@ final class Library extends SQLiteOpenHelper {
       series = Uri.decode(parent).replaceAll("/+$", "").replaceFirst("^.*[:/]", "");
     else series = title;
     boolean inBundle = url.indexOf(Archive.NESTED) >= 0;
-    group =
-        volume.number >= 0 && (!volume.title.isEmpty() || inBundle)
-            ? "series:" + Order.seriesKey(series)
-            : parent + "\n" + Order.seriesKey(series);
+    String key = Order.seriesKey(series);
+    // 파일 이름에 작품명이 있으면 권 번호가 없어도 폴더와 상관없이 같은 이름끼리 묶는다.
+    boolean named =
+        !volume.title.isEmpty() ? volume.number >= 0 || !Order.genericKey(key) : inBundle;
+    group = named ? "series:" + key : parent + "\n" + key;
     try (Cursor c =
         getReadableDatabase()
             .rawQuery(
