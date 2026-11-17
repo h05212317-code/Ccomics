@@ -68,6 +68,12 @@ public final class Main extends Activity {
     setContentView(frame);
     library(false);
     if (state == null) updates.check(false);
+    if (state == null && prefs.getInt("rulesScan", 0) < Library.RULES
+        && !db.strings("SELECT id FROM sources").isEmpty()) {
+      // 업데이트로 제목·묶음 인식 규칙이 바뀌면 한 번 자동으로 다시 읽는다.
+      prefs.edit().putInt("rulesScan", Library.RULES).apply();
+      refreshSources(true);
+    }
     if (state != null && state.getLong("reading") > 0) {
       Library.Book b = db.get(state.getLong("reading"));
       if (b != null) open(b);

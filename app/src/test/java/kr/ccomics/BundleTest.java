@@ -44,6 +44,47 @@ public class BundleTest {
   }
 
   @Test
+  public void seventyVolumeBundleWithCoversBecomesSeventyBooks() throws Exception {
+    Context ctx = RuntimeEnvironment.getApplication();
+    File file = new File(ctx.getCacheDir(), "블리치1~74권.zip");
+    try (ZipArchiveOutputStream zip = new ZipArchiveOutputStream(file)) {
+      for (int i = 1; i <= 70; i++) {
+        put(zip, "블리치 " + i + "권.zip", volume(6), true);
+        put(zip, "covers/" + i + ".jpg", new byte[] {1}, false);
+      }
+    }
+    String outer = android.net.Uri.fromFile(file).toString();
+    Library lib = new Library(ctx);
+    List<Long> pending = new ArrayList<>();
+    lib.record(1, outer, file.getName(), "folder", file.length(), 5, 9, pending);
+    Library.Book b = lib.get(pending.get(0));
+    assertEquals("블리치", b.series);
+    try {
+      new Archive(ctx, outer, null).close();
+      fail("표지가 있어도 권 ZIP 묶음이어야 합니다.");
+    } catch (Archive.Bundle bundle) {
+      assertEquals(70, bundle.volumes.size());
+      lib.exec("UPDATE books SET bundle=1 WHERE id=?", b.id);
+      lib.expandBundle(b, bundle.volumes, 9, pending);
+    }
+    List<Library.Book> books = lib.books();
+    assertEquals(70, books.size());
+    Set<Integer> numbers = new TreeSet<>();
+    for (Library.Book v : books) {
+      assertEquals("series:블리치", v.grp);
+      assertEquals("블리치", v.series);
+      numbers.add(Order.volume(v.title).number);
+    }
+    assertEquals(70, numbers.size());
+    assertEquals(Integer.valueOf(1), ((TreeSet<Integer>) numbers).first());
+    assertEquals(Integer.valueOf(70), ((TreeSet<Integer>) numbers).last());
+    try (Archive a = new Archive(ctx, Archive.nested(outer, "블리치 70권.zip"), null)) {
+      assertEquals(6, a.pages.size());
+    }
+    lib.close();
+  }
+
+  @Test
   public void volumesInsideBundleZipOpenAndGroupAsOneSeries() throws Exception {
     Context ctx = RuntimeEnvironment.getApplication();
     File file = new File(ctx.getCacheDir(), "블리치.zip");

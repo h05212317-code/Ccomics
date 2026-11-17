@@ -74,6 +74,17 @@ public class OrderTest {
     assertEquals(10, Order.volume("블리치 10 (문구).zip").number);
     assertEquals(2, Order.volume("하늘 2권 [외전].zip").number);
     assertEquals(-1, Order.volume("블리치 (문구).zip").number);
+    for (String f :
+        new String[] {
+          "블리치1~74권.zip", "블리치 1~74권.zip", "블리치 1-74.zip", "블리치_01~74권_완결.zip",
+          "블리치 1권~74권.zip", "블리치 (1-74권).zip", "[완결] 블리치 1~74권 (문구).zip", "블리치 전74권.zip",
+          "블리치 1~686화.zip"
+        }) {
+      assertEquals(f, key, Order.seriesKey(Order.series(f)));
+      assertEquals(f, "블리치", Order.shelfTitle(Order.series(f), true));
+      assertEquals(f, -1, Order.volume(f).number);
+    }
+    assertEquals(key, Order.seriesKey("블리치1~74권"));
     assertTrue(Order.genericKey(Order.seriesKey("외전")));
     assertFalse(Order.genericKey(key));
   }

@@ -277,6 +277,9 @@ final class Library extends SQLiteOpenHelper {
     batch.flush();
     exec("UPDATE books SET missing=1 WHERE source=? AND seen<>?", source, token);
     notice.changed();
+    SharedPreferences rules = ctx.getSharedPreferences("options", 0);
+    String rulesKey = "rules-" + source;
+    if (rules.getInt(rulesKey, 0) < RULES) recheckBundles(source, token, pending);
     int n = 0;
     for (int k = 0; k < pending.size(); k++) {
       long id = pending.get(k);
@@ -306,13 +309,38 @@ final class Library extends SQLiteOpenHelper {
       if (++n % 8 == 0) notice.changed();
     }
     reconcileMoved(source, pending);
+    rules.edit().putInt(rulesKey, RULES).apply();
     notice.changed();
+  }
+
+  /** 인식 규칙이 바뀐 뒤 한 번, 이미 열리던 책 중 권 ZIP 묶음인 것을 찾아 권별로 나눈다. */
+  static final int RULES = 2;
+
+  void recheckBundles(long source, long token, List<Long> pending) {
+    Set<Long> queued = new HashSet<>(pending);
+    List<String> ids =
+        strings(
+            "SELECT id FROM books WHERE source=? AND missing=0 AND bundle=0 AND pages>0 AND"
+                + " instr(url,char(10))=0",
+            "" + source);
+    for (String s : ids) {
+      long id = Long.parseLong(s);
+      if (queued.contains(id)) continue;
+      Book b = get(id);
+      try (Archive a = open(b)) {
+        // 그대로 한 권
+      } catch (Archive.Bundle bundle) {
+        exec("UPDATE books SET bundle=1,pages=0,error='' WHERE id=?", id);
+        expandBundle(b, bundle.volumes, token, pending);
+      } catch (Exception ignored) {
+      }
+    }
   }
 
   /** 묶음 ZIP 안의 권 ZIP마다 책을 등록한다. 권 번호만 있는 이름은 바깥 파일 이름을 작품명으로 쓴다. */
   void expandBundle(Book outer, List<org.apache.commons.compress.archivers.zip.ZipArchiveEntry> volumes,
       long token, List<Long> pending) {
-    String parent = bundleParent(outer.title);
+    String parent = bundleParent(Order.series(outer.title + ".zip"));
     SQLiteDatabase database = getWritableDatabase();
     database.beginTransactionNonExclusive();
     try {

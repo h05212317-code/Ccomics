@@ -44,18 +44,31 @@ final class Order {
             .trim()
             .replaceAll("\\s+", " ");
     String clean = name, before;
+    boolean range = false;
     do {
       before = clean;
       clean = stripTrailing(TAGS.matcher(clean).replaceFirst("").trim(), false);
+      String cut = RANGE.matcher(clean).replaceFirst("").trim();
+      if (!cut.isEmpty() && !cut.equals(clean)) {
+        clean = cut;
+        range = true;
+      }
     } while (!clean.equals(before));
+    // 1~74권 같은 범위 표기는 한 권이 아니라 작품 전체이므로 권 번호 없이 작품명만 쓴다.
+    if (range) return new Volume(clean, -1);
     Matcher m = NUMBER.matcher(clean);
     if (m.find()) {
       for (int i = 1; i <= m.groupCount(); i++)
         if (m.group(i) != null)
           return new Volume(clean.substring(0, m.start()).trim(), Integer.parseInt(m.group(i)));
     }
-    return new Volume(name, -1);
+    return new Volume(clean.isEmpty() ? name : clean, -1);
   }
+
+  /** 1~74권, 01-74, 1권~74권, 1~120화, 전 74권 같은 범위·전권 표기. */
+  static final Pattern RANGE =
+      Pattern.compile(
+          "(?iu)(?:[\\s._\\-]*(?:제\\s*)?\\d{1,4}\\s*(?:권|화|편|巻|vol\\.?)?\\s*[~\\-–—〜]\\s*\\d{1,4}\\s*(?:권|화|편|巻)?|[\\s._\\-]*전\\s*\\d{1,4}\\s*권)$");
 
   /** 내용과 상관없이 괄호 한 덩어리: [..] (..) {..} 【..】 */
   private static final String BRACKET =
@@ -104,6 +117,8 @@ final class Order {
     do {
       before = bare;
       bare = stripTrailing(TAGS.matcher(withoutLeadingTags(bare)).replaceFirst("").trim(), false);
+      String cut = RANGE.matcher(bare).replaceFirst("").trim();
+      if (!cut.isEmpty()) bare = cut;
     } while (!bare.equals(before));
     String key = KEY_SEPARATORS.matcher(bare).replaceAll("");
     return key.isEmpty() ? name.replace(" ", "") : key;

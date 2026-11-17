@@ -297,16 +297,22 @@ final class Archive implements Closeable {
       }
       zip = zipFile(channel);
       List<ZipArchiveEntry> volumes = new ArrayList<>();
+      long imageBytes = 0, volumeBytes = 0;
       Enumeration<ZipArchiveEntry> all = zip.getEntries();
       while (all.hasMoreElements()) {
         ZipArchiveEntry e = all.nextElement();
         if (e.isDirectory()) continue;
-        if (Order.image(e.getName())) pages.add(e);
-        else if (entry == null && volumeFile(e.getName()) && Order.image(e.getName() + ".jpg"))
+        if (Order.image(e.getName())) {
+          pages.add(e);
+          imageBytes += Math.max(0, e.getSize());
+        } else if (entry == null && volumeFile(e.getName()) && Order.image(e.getName() + ".jpg")) {
           volumes.add(e);
+          volumeBytes += Math.max(0, e.getSize());
+        }
         if (pages.size() > 50000) throw new IOException("이미지가 너무 많습니다.");
       }
-      if (!volumes.isEmpty() && pages.size() < 5) {
+      // 권 ZIP이 내용 대부분이면 표지 이미지가 함께 있어도 묶음으로 본다.
+      if (!volumes.isEmpty() && (pages.size() < 5 || volumeBytes >= imageBytes)) {
         volumes.sort((a, b) -> Order.natural(a.getName(), b.getName()));
         throw new Bundle(volumes);
       }
