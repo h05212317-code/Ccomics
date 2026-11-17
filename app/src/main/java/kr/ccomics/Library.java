@@ -318,7 +318,7 @@ final class Library extends SQLiteOpenHelper {
   }
 
   /** 인식 규칙이 바뀐 뒤 한 번, 이미 열리던 책 중 권 ZIP 묶음인 것을 찾아 권별로 나눈다. */
-  static final int RULES = 4;
+  static final int RULES = 5;
 
   void recheckBundles(long source, long token, List<Long> pending) {
     Set<Long> queued = new HashSet<>(pending);
@@ -456,6 +456,19 @@ final class Library extends SQLiteOpenHelper {
               token,
               src,
               prefix);
+          // 묶음이 그대로여도 안쪽 권의 표지가 없거나 오류가 있으면 다시 만든다.
+          try (Cursor inner =
+              getReadableDatabase()
+                  .rawQuery(
+                      "SELECT id,pages,error FROM books WHERE source=? AND instr(url,?)=1",
+                      new String[] {"" + src, prefix})) {
+            while (inner.moveToNext()) {
+              long child = inner.getLong(0);
+              if (inner.getInt(1) == 0
+                  || !inner.getString(2).isEmpty()
+                  || !coverFile(child).isFile()) pending.add(child);
+            }
+          }
           exec("UPDATE books SET title=?,seen=?,missing=0 WHERE id=?", title, token, id);
           return;
         }

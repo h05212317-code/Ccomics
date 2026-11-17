@@ -128,6 +128,17 @@ public class BundleTest {
     try (Archive a = new Archive(ctx, Archive.nested(outer, "블리치 70권.zip"), null)) {
       assertEquals(6, a.pages.size());
     }
+    // 묶음 파일이 그대로여도 표지가 없는 안쪽 권은 다시 표지를 만들 대상이 된다.
+    List<Long> again = new ArrayList<>();
+    lib.record(1, outer, file.getName(), "folder", file.length(), 5, 10, again);
+    assertEquals(70, again.size());
+    for (Library.Book v : lib.books()) lib.exec("UPDATE books SET pages=6 WHERE id=?", v.id);
+    lib.writeCover(books.get(0).id, android.graphics.Bitmap.createBitmap(4, 6, android.graphics.Bitmap.Config.ARGB_8888));
+    again.clear();
+    lib.record(1, outer, file.getName(), "folder", file.length(), 5, 11, again);
+    assertEquals(69, again.size());
+    assertFalse(again.contains(books.get(0).id));
+    assertEquals(70, lib.books().size());
     lib.close();
   }
 
