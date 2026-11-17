@@ -85,6 +85,21 @@ public class OrderTest {
       assertEquals(f, -1, Order.volume(f).number);
     }
     assertEquals(key, Order.seriesKey("블리치1~74권"));
+    // 특정 제목이 아니라 모든 제목에 같은 규칙이 적용되는지 확인
+    String[][] works = {
+      {"원피스", "[완결] 원피스_1~105권 (스캔).zip", "원피스 3권 [원본].zip", "(고화질) 원피스_004권.cbz"},
+      {"진격의 거인", "진격의_거인_전34권.zip", "{문구} 진격의 거인 12권 (AI번역).zip", "진격의거인 Vol.5.zip"},
+      {"NARUTO", "NARUTO 1-72 [scan].zip", "naruto 01 (문구).cbz", "【문구】Naruto_02권.zip"},
+      {"그 비스크 돌은 사랑을 한다", "그_비스크_돌은_사랑을_한다_1~13권.zip", "[문구] 그 비스크 돌은 사랑을 한다 (문구).zip"}
+    };
+    for (String[] w : works)
+      for (int i = 1; i < w.length; i++) {
+        assertEquals(w[i], Order.seriesKey(w[0]), Order.seriesKey(Order.series(w[i])));
+        assertEquals(w[i], w[0].toLowerCase(), Order.shelfTitle(Order.series(w[i]), true).toLowerCase().replace("진격의거인", "진격의 거인"));
+      }
+    assertEquals(3, Order.volume("원피스 3권 [원본].zip").number);
+    assertEquals(12, Order.volume("{문구} 진격의 거인 12권 (AI번역).zip").number);
+    assertEquals(1, Order.volume("naruto 01 (문구).cbz").number);
     assertTrue(Order.genericKey(Order.seriesKey("외전")));
     assertFalse(Order.genericKey(key));
   }
