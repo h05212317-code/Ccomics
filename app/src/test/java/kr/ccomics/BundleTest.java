@@ -44,6 +44,53 @@ public class BundleTest {
   }
 
   @Test
+  public void volumeFoldersInsideOneZipBecomeBooks() throws Exception {
+    Context ctx = RuntimeEnvironment.getApplication();
+    File file = new File(ctx.getCacheDir(), "원피스 1~74권.zip");
+    try (ZipArchiveOutputStream zip = new ZipArchiveOutputStream(file)) {
+      put(zip, "원피스/cover.jpg", new byte[] {1}, false);
+      for (int v = 1; v <= 74; v++)
+        for (int p = 1; p <= 3; p++)
+          put(zip, "원피스/원피스 " + v + "권/" + p + ".jpg", new byte[] {(byte) p}, false);
+    }
+    String outer = android.net.Uri.fromFile(file).toString();
+    Library lib = new Library(ctx);
+    List<Long> pending = new ArrayList<>();
+    lib.record(1, outer, file.getName(), "folder", file.length(), 5, 9, pending);
+    Library.Book b = lib.get(pending.get(0));
+    try {
+      new Archive(ctx, outer, null).close();
+      fail("권 폴더 묶음이어야 합니다.");
+    } catch (Archive.Bundle bundle) {
+      assertEquals(74, bundle.volumes.size());
+      assertEquals("원피스/원피스 1권/", bundle.volumes.get(0).getName());
+      assertEquals("원피스/원피스 74권/", bundle.volumes.get(73).getName());
+      lib.exec("UPDATE books SET bundle=1 WHERE id=?", b.id);
+      lib.expandBundle(b, bundle.volumes, 9, pending);
+    }
+    List<Library.Book> books = lib.books();
+    assertEquals(74, books.size());
+    for (Library.Book v : books) assertEquals("series:" + Order.seriesKey("원피스"), v.grp);
+    try (Archive a = new Archive(ctx, Archive.nested(outer, "원피스/원피스 10권/"), null)) {
+      assertEquals(3, a.pages.size());
+      assertEquals("원피스/원피스 10권/1.jpg", a.name(0));
+    }
+    lib.close();
+  }
+
+  @Test
+  public void chapterFoldersStayOneBook() throws Exception {
+    List<ZipArchiveEntry> images = new ArrayList<>();
+    for (int c = 1; c <= 8; c++)
+      for (int p = 1; p <= 20; p++) images.add(new ZipArchiveEntry("책/" + c + "화/" + p + ".jpg"));
+    assertNull(Archive.volumeFolders(images));
+    images.clear();
+    for (int c = 1; c <= 8; c++)
+      for (int p = 1; p <= 20; p++) images.add(new ZipArchiveEntry(String.format("%02d/%d.jpg", c, p)));
+    assertNull(Archive.volumeFolders(images));
+  }
+
+  @Test
   public void seventyVolumeBundleWithCoversBecomesSeventyBooks() throws Exception {
     Context ctx = RuntimeEnvironment.getApplication();
     File file = new File(ctx.getCacheDir(), "블리치1~74권.zip");

@@ -314,7 +314,7 @@ final class Library extends SQLiteOpenHelper {
   }
 
   /** 인식 규칙이 바뀐 뒤 한 번, 이미 열리던 책 중 권 ZIP 묶음인 것을 찾아 권별로 나눈다. */
-  static final int RULES = 2;
+  static final int RULES = 3;
 
   void recheckBundles(long source, long token, List<Long> pending) {
     Set<Long> queued = new HashSet<>(pending);
@@ -346,7 +346,9 @@ final class Library extends SQLiteOpenHelper {
     try {
       for (org.apache.commons.compress.archivers.zip.ZipArchiveEntry e : volumes) {
         String path = e.getName();
-        String name = path.substring(path.lastIndexOf('/') + 1);
+        String bare = path.endsWith("/") ? path.substring(0, path.length() - 1) : path;
+        String name = bare.substring(bare.lastIndexOf('/') + 1);
+        if (path.endsWith("/")) name += ".zip"; // 권 폴더도 같은 이름 규칙으로 읽는다.
         record(outer.source, Archive.nested(outer.url, path), name, parent, e.getSize(),
             outer.changed, token, pending);
       }

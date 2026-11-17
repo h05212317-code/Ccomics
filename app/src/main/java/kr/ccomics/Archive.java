@@ -257,6 +257,54 @@ final class Archive implements Closeable {
     return new FileInputStream(spooled[0]).getChannel();
   }
 
+  private static final java.util.regex.Pattern VOLUME_MARK =
+      java.util.regex.Pattern.compile("(?iu)(?:\\d{1,4}\\s*[권巻]|vol(?:ume)?\\.?\\s*\\d|제\\s*\\d|第\\s*\\d)");
+
+  /**
+   * 이미지가 권별 폴더(블리치 1권/, 블리치 2권/ …)에 나뉘어 있으면 폴더마다 한 권으로 본다. 반환값은 폴더 경로(끝이 /)와
+   * 이미지 용량 합계를 담은 항목 목록이고, 권 폴더 구조가 아니면 null.
+   */
+  static List<ZipArchiveEntry> volumeFolders(List<ZipArchiveEntry> images) {
+    if (images.size() < 2) return null;
+    String common = null;
+    for (ZipArchiveEntry e : images) {
+      String n = e.getName(), dir = n.substring(0, n.lastIndexOf('/') + 1);
+      if (common == null) common = dir;
+      else
+        while (!dir.startsWith(common))
+          common = common.substring(0, common.lastIndexOf('/', common.length() - 2) + 1);
+    }
+    Map<String, long[]> groups = new TreeMap<>(Order::natural);
+    for (ZipArchiveEntry e : images) {
+      String rest = e.getName().substring(common.length());
+      int slash = rest.indexOf('/');
+      if (slash < 0) continue; // 공통 폴더 바로 아래 이미지(전체 표지 등)는 권에 넣지 않는다.
+      long[] g = groups.computeIfAbsent(rest.substring(0, slash), k -> new long[2]);
+      g[0]++;
+      g[1] += Math.max(0, e.getSize());
+    }
+    if (groups.size() < 2) return null;
+    int marked = 0, numbered = 0;
+    for (String name : groups.keySet()) {
+      if (VOLUME_MARK.matcher(name).find()) marked++;
+      if (Order.volume(name + ".zip").number >= 0) numbered++;
+    }
+    // 권 표기가 있는 폴더가 절반 이상이거나, 숫자 폴더가 5개 이상이고 평균 100쪽 이상(화가 아닌 권 크기)일 때만 나눈다.
+    boolean volumes =
+        marked * 2 >= groups.size()
+            || (numbered * 2 >= groups.size()
+                && groups.size() >= 5
+                && images.size() / groups.size() >= 100);
+    if (!volumes) return null;
+    List<ZipArchiveEntry> list = new ArrayList<>();
+    for (Map.Entry<String, long[]> g : groups.entrySet()) {
+      ZipArchiveEntry e = new ZipArchiveEntry(common + g.getKey() + "/");
+      e.setSize(g.getValue()[1]);
+      list.add(e);
+    }
+    return list;
+  }
+
   ZipFile outer;
   File innerSpool;
 
@@ -291,7 +339,9 @@ final class Archive implements Closeable {
     File[] spooled = new File[1];
     ZipFile container = null;
     try {
-      if (entry != null) {
+      // 항목 경로가 /로 끝나면 바깥 ZIP 안의 권 폴더, 아니면 안쪽 권 ZIP이다.
+      boolean folder = entry != null && entry.endsWith("/");
+      if (entry != null && !folder) {
         container = zipFile(channel);
         channel = inner(ctx, container, channel, entry, spooled);
       }
@@ -302,6 +352,7 @@ final class Archive implements Closeable {
       while (all.hasMoreElements()) {
         ZipArchiveEntry e = all.nextElement();
         if (e.isDirectory()) continue;
+        if (folder && !e.getName().startsWith(entry)) continue;
         if (Order.image(e.getName())) {
           pages.add(e);
           imageBytes += Math.max(0, e.getSize());
@@ -315,6 +366,10 @@ final class Archive implements Closeable {
       if (!volumes.isEmpty() && (pages.size() < 5 || volumeBytes >= imageBytes)) {
         volumes.sort((a, b) -> Order.natural(a.getName(), b.getName()));
         throw new Bundle(volumes);
+      }
+      if (entry == null) {
+        List<ZipArchiveEntry> folders = volumeFolders(pages);
+        if (folders != null) throw new Bundle(folders);
       }
       pages.sort((a, b) -> Order.natural(a.getName(), b.getName()));
       if (pages.isEmpty()) throw new IOException("JPEG, PNG, WebP 이미지가 없습니다.");
