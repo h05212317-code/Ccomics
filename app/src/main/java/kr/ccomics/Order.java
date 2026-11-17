@@ -53,12 +53,35 @@ final class Order {
     return new Volume(name, -1);
   }
 
+  private static final Pattern LEADING_TAGS =
+      Pattern.compile("^(?:\\s*[\\[【][^\\]】]*[\\]】])+\\s*");
+  private static final Pattern KEY_SEPARATORS =
+      Pattern.compile("[\\s_:;\\-~〜()\\[\\]{}【】.,!?'\"+·♡♥❤☆★\\ufe0f]+");
+
+  static String withoutLeadingTags(String title) {
+    String rest = LEADING_TAGS.matcher(title).replaceFirst("").trim();
+    return rest.isEmpty() ? title.trim() : rest;
+  }
+
+  /** 앞쪽 [문구], 띄어쓰기·밑줄·문장부호 차이를 무시하는 시리즈 비교 키. */
+  static String seriesKey(String series) {
+    String name =
+        java.text.Normalizer.normalize(series, java.text.Normalizer.Form.NFKC)
+            .replace('_', ' ')
+            .toLowerCase(Locale.ROOT);
+    String key = KEY_SEPARATORS.matcher(withoutLeadingTags(name)).replaceAll("");
+    return key.isEmpty() ? name.replace(" ", "") : key;
+  }
+
   static String shelfTitle(String title, boolean hideTags) {
     if (!hideTags) return title;
-    Matcher tags = TAGS.matcher(title.replace('_', ' ').trim());
-    if (!tags.find()) return title;
-    String shortTitle = title.trim().substring(0, tags.start()).trim();
-    return volume(shortTitle).number >= 0 ? shortTitle : title;
+    String name = withoutLeadingTags(title.replace('_', ' ').trim().replaceAll("\\s+", " "));
+    Matcher tags = TAGS.matcher(name);
+    if (tags.find()) {
+      String shortTitle = name.substring(0, tags.start()).trim();
+      if (volume(shortTitle).number >= 0) return shortTitle;
+    }
+    return name;
   }
 
   static String series(String filename) {

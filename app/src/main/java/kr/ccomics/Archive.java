@@ -15,7 +15,7 @@ import jcifs.smb.*;
 import org.apache.commons.compress.archivers.zip.*;
 
 final class Archive implements Closeable {
-  final ZipFile zip;
+  ZipFile zip;
   final List<ZipArchiveEntry> pages = new ArrayList<>();
   final File spool;
   static final long MAX_PAGE = 128L << 20;
@@ -133,9 +133,139 @@ final class Archive implements Closeable {
                 parts.length == 2 ? parts[0] : "", parts[parts.length - 1], pass));
   }
 
+  /** 묶음 ZIP 안의 권 ZIP 주소: 바깥 파일 주소 + 줄바꿈 + 안쪽 항목 경로. */
+  static final char NESTED = '\n';
+
+  static String nested(String outer, String entry) {
+    return outer + NESTED + entry;
+  }
+
+  static boolean volumeFile(String name) {
+    return name.toLowerCase(Locale.ROOT).matches("(?s).*\\.(cbz|zip)$");
+  }
+
+  /** 이미지가 거의 없고 권 ZIP을 담은 묶음 파일일 때 스캔 단계로 안쪽 목록을 알린다. */
+  static final class Bundle extends IOException {
+    final List<ZipArchiveEntry> volumes;
+
+    Bundle(List<ZipArchiveEntry> volumes) {
+      super("권 ZIP 묶음");
+      this.volumes = volumes;
+    }
+  }
+
+  /** 바깥 ZIP의 무압축 항목을 그대로 읽는 구간 채널. */
+  static final class Slice implements SeekableByteChannel {
+    final SeekableByteChannel base;
+    final long start, length;
+    long pos;
+
+    Slice(SeekableByteChannel base, long start, long length) {
+      this.base = base;
+      this.start = start;
+      this.length = length;
+    }
+
+    public int read(ByteBuffer dst) throws IOException {
+      if (pos >= length) return -1;
+      synchronized (base) {
+        int limit = dst.limit();
+        if (dst.remaining() > length - pos) dst.limit(dst.position() + (int) (length - pos));
+        try {
+          base.position(start + pos);
+          int n = base.read(dst);
+          if (n > 0) pos += n;
+          return n;
+        } finally {
+          dst.limit(limit);
+        }
+      }
+    }
+
+    public int write(ByteBuffer src) {
+      throw new NonWritableChannelException();
+    }
+
+    public long position() {
+      return pos;
+    }
+
+    public SeekableByteChannel position(long p) {
+      if (p < 0) throw new IllegalArgumentException();
+      pos = p;
+      return this;
+    }
+
+    public long size() {
+      return length;
+    }
+
+    public SeekableByteChannel truncate(long n) {
+      throw new NonWritableChannelException();
+    }
+
+    public boolean isOpen() {
+      return base.isOpen();
+    }
+
+    public void close() {}
+  }
+
+  static ZipFile zipFile(SeekableByteChannel channel) throws IOException {
+    validateDirectory(channel);
+    return ZipFile.builder()
+        .setSeekableByteChannel(channel)
+        .setCharset(java.nio.charset.Charset.forName("MS949"))
+        .setIgnoreLocalFileHeader(true)
+        .get();
+  }
+
+  static long dataOffset(SeekableByteChannel channel, ZipArchiveEntry e) throws IOException {
+    long header = e.getLocalHeaderOffset();
+    ByteBuffer local = readRange(channel, header, 30);
+    if (local.getInt(0) != 0x04034b50) throw new IOException("묶음 ZIP 항목 헤더 오류");
+    return header + 30 + (local.getShort(26) & 65535) + (local.getShort(28) & 65535);
+  }
+
+  /** 안쪽 권 ZIP을 연다. 무압축이면 바깥 파일에서 바로 읽고, 압축돼 있으면 임시 파일로 푼다. */
+  static SeekableByteChannel inner(Context ctx, ZipFile outer, SeekableByteChannel channel,
+      String entry, File[] spooled) throws IOException {
+    ZipArchiveEntry e = outer.getEntry(entry);
+    if (e == null) throw new FileNotFoundException("묶음 ZIP 안에서 " + entry + " 파일을 찾을 수 없습니다.");
+    if (!outer.canReadEntryData(e)) throw new IOException("암호화 또는 지원하지 않는 ZIP 압축 방식입니다.");
+    if (e.getMethod() == ZipArchiveEntry.STORED && e.getSize() > 0)
+      return new Slice(channel, dataOffset(channel, e), e.getSize());
+    synchronized (Archive.class) {
+      clearSpools(ctx);
+      long budget = 512L << 20;
+      for (File active : activeSpools) budget -= active.length();
+      if (e.getSize() > budget) throw new IOException("임시 저장 공간 한도 512MB를 초과했습니다.");
+      File temp = File.createTempFile("pages-", ".zip", ctx.getCacheDir());
+      activeSpools.add(temp);
+      spooled[0] = temp;
+    }
+    try (InputStream in = outer.getInputStream(e);
+        OutputStream out = new FileOutputStream(spooled[0])) {
+      byte[] buf = new byte[65536];
+      long left = 512L << 20;
+      int n;
+      while ((n = in.read(buf)) != -1) {
+        if ((left -= n) < 0) throw new IOException("임시 저장 공간 한도 512MB를 초과했습니다.");
+        out.write(buf, 0, n);
+      }
+    }
+    return new FileInputStream(spooled[0]).getChannel();
+  }
+
+  ZipFile outer;
+  File innerSpool;
+
   Archive(Context ctx, String address, CIFSContext server) throws Exception {
     SeekableByteChannel channel;
     File temp = null;
+    int split = address.indexOf(NESTED);
+    String entry = split < 0 ? null : address.substring(split + 1);
+    if (split >= 0) address = address.substring(0, split);
     if (address.startsWith("smb://")) channel = new RemoteChannel(new SmbFile(address, server));
     else {
       Uri uri = Uri.parse(address);
@@ -158,19 +288,27 @@ final class Archive implements Closeable {
       }
     }
     spool = temp;
+    File[] spooled = new File[1];
+    ZipFile container = null;
     try {
-      validateDirectory(channel);
-      zip =
-          ZipFile.builder()
-              .setSeekableByteChannel(channel)
-              .setCharset(java.nio.charset.Charset.forName("MS949"))
-              .setIgnoreLocalFileHeader(true)
-              .get();
+      if (entry != null) {
+        container = zipFile(channel);
+        channel = inner(ctx, container, channel, entry, spooled);
+      }
+      zip = zipFile(channel);
+      List<ZipArchiveEntry> volumes = new ArrayList<>();
       Enumeration<ZipArchiveEntry> all = zip.getEntries();
       while (all.hasMoreElements()) {
         ZipArchiveEntry e = all.nextElement();
-        if (!e.isDirectory() && Order.image(e.getName())) pages.add(e);
+        if (e.isDirectory()) continue;
+        if (Order.image(e.getName())) pages.add(e);
+        else if (entry == null && volumeFile(e.getName()) && Order.image(e.getName() + ".jpg"))
+          volumes.add(e);
         if (pages.size() > 50000) throw new IOException("이미지가 너무 많습니다.");
+      }
+      if (!volumes.isEmpty() && pages.size() < 5) {
+        volumes.sort((a, b) -> Order.natural(a.getName(), b.getName()));
+        throw new Bundle(volumes);
       }
       pages.sort((a, b) -> Order.natural(a.getName(), b.getName()));
       if (pages.isEmpty()) throw new IOException("JPEG, PNG, WebP 이미지가 없습니다.");
@@ -178,11 +316,16 @@ final class Archive implements Closeable {
       for (int i = 1; i < pages.size(); i++)
         if (Order.coverRank(name(i)) < Order.coverRank(name(cover))) cover = i;
       if (cover != 0 && Order.coverRank(name(cover)) <= 1) pages.add(0, pages.remove(cover));
+      outer = container;
+      innerSpool = spooled[0];
     } catch (Exception e) {
       try {
+        if (zip != null) zip.close();
+        if (container != null) container.close();
         channel.close();
       } finally {
         release(temp);
+        release(spooled[0]);
       }
       throw e;
     }
@@ -305,8 +448,10 @@ final class Archive implements Closeable {
   public void close() throws IOException {
     try {
       zip.close();
+      if (outer != null) outer.close();
     } finally {
       release(spool);
+      release(innerSpool);
     }
   }
 }

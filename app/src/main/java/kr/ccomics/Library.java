@@ -21,7 +21,7 @@ final class Library extends SQLiteOpenHelper {
   final File covers;
 
   Library(Context c) {
-    super(c, "library.db", null, 3);
+    super(c, "library.db", null, 4);
     ctx = c;
     setWriteAheadLoggingEnabled(true);
     covers = new File(c.getFilesDir(), "covers");
@@ -39,6 +39,7 @@ final class Library extends SQLiteOpenHelper {
             + " DEFAULT '',rep INTEGER DEFAULT 0,error TEXT DEFAULT '')");
     db.execSQL("ALTER TABLE books ADD COLUMN fingerprint TEXT DEFAULT ''");
     db.execSQL("ALTER TABLE books ADD COLUMN manualGroup INTEGER DEFAULT 0");
+    db.execSQL("ALTER TABLE books ADD COLUMN bundle INTEGER DEFAULT 0");
     db.execSQL("CREATE INDEX series_index ON books(grp)");
     db.execSQL("CREATE TABLE shelves(name TEXT PRIMARY KEY)");
     db.execSQL("CREATE TABLE marks(book INTEGER,page INTEGER,PRIMARY KEY(book,page))");
@@ -47,6 +48,7 @@ final class Library extends SQLiteOpenHelper {
   public void onUpgrade(SQLiteDatabase db, int from, int to) {
     if (from < 3) db.execSQL("ALTER TABLE books ADD COLUMN manualGroup INTEGER DEFAULT -1");
     if (from < 2) db.execSQL("ALTER TABLE books ADD COLUMN fingerprint TEXT DEFAULT ''");
+    if (from < 4) db.execSQL("ALTER TABLE books ADD COLUMN bundle INTEGER DEFAULT 0");
   }
 
   static class Book {
@@ -84,7 +86,7 @@ final class Library extends SQLiteOpenHelper {
 
   List<Book> books() {
     List<Book> r = new ArrayList<>();
-    try (Cursor c = getReadableDatabase().rawQuery(SELECT + " WHERE missing=0", null)) {
+    try (Cursor c = getReadableDatabase().rawQuery(SELECT + " WHERE missing=0 AND bundle=0", null)) {
       while (c.moveToNext()) r.add(new Book(c));
     }
     return r;
@@ -276,7 +278,8 @@ final class Library extends SQLiteOpenHelper {
     exec("UPDATE books SET missing=1 WHERE source=? AND seen<>?", source, token);
     notice.changed();
     int n = 0;
-    for (long id : pending) {
+    for (int k = 0; k < pending.size(); k++) {
+      long id = pending.get(k);
       Book b = get(id);
       try (Archive a = open(b)) {
         int index = 0;
@@ -289,11 +292,14 @@ final class Library extends SQLiteOpenHelper {
         writeCover(id, image);
         image.recycle();
         exec(
-            "UPDATE books SET pages=?,page=min(page,?),fingerprint=?,error='' WHERE id=?",
+            "UPDATE books SET pages=?,page=min(page,?),fingerprint=?,error='',bundle=0 WHERE id=?",
             a.pages.size(),
             a.pages.size() - 1,
             a.fingerprint(),
             id);
+      } catch (Archive.Bundle bundle) {
+        exec("UPDATE books SET bundle=1,pages=0,error='' WHERE id=?", id);
+        expandBundle(b, bundle.volumes, token, pending);
       } catch (Exception e) {
         exec("UPDATE books SET error=? WHERE id=?", reason(e), id);
       }
@@ -301,6 +307,29 @@ final class Library extends SQLiteOpenHelper {
     }
     reconcileMoved(source, pending);
     notice.changed();
+  }
+
+  /** 묶음 ZIP 안의 권 ZIP마다 책을 등록한다. 권 번호만 있는 이름은 바깥 파일 이름을 작품명으로 쓴다. */
+  void expandBundle(Book outer, List<org.apache.commons.compress.archivers.zip.ZipArchiveEntry> volumes,
+      long token, List<Long> pending) {
+    String parent = bundleParent(outer.title);
+    SQLiteDatabase database = getWritableDatabase();
+    database.beginTransactionNonExclusive();
+    try {
+      for (org.apache.commons.compress.archivers.zip.ZipArchiveEntry e : volumes) {
+        String path = e.getName();
+        String name = path.substring(path.lastIndexOf('/') + 1);
+        record(outer.source, Archive.nested(outer.url, path), name, parent, e.getSize(),
+            outer.changed, token, pending);
+      }
+      database.setTransactionSuccessful();
+    } finally {
+      database.endTransaction();
+    }
+  }
+
+  static String bundleParent(String outerTitle) {
+    return "bundle/" + outerTitle.replace(':', '：').replace('/', '／');
   }
 
   void reconcileMoved(long source, List<Long> scanned) {
@@ -372,17 +401,29 @@ final class Library extends SQLiteOpenHelper {
     else if (!parent.equals("single"))
       series = Uri.decode(parent).replaceAll("/+$", "").replaceFirst("^.*[:/]", "");
     else series = title;
+    boolean inBundle = url.indexOf(Archive.NESTED) >= 0;
     group =
-        volume.number >= 0 && !volume.title.isEmpty()
-            ? "series:" + series.toLowerCase(Locale.ROOT).replace(" ", "")
-            : parent + "\n" + series;
+        volume.number >= 0 && (!volume.title.isEmpty() || inBundle)
+            ? "series:" + Order.seriesKey(series)
+            : parent + "\n" + Order.seriesKey(series);
     try (Cursor c =
         getReadableDatabase()
             .rawQuery(
-                "SELECT id,size,changed,pages,error,grp,series,manualGroup FROM books WHERE url=?",
+                "SELECT id,size,changed,pages,error,grp,series,manualGroup,bundle FROM books WHERE"
+                    + " url=?",
                 new String[] {url})) {
       if (c.moveToFirst()) {
         long id = c.getLong(0);
+        if (c.getInt(8) == 1 && c.getLong(1) == size && c.getLong(2) == changed) {
+          String prefix = url + Archive.NESTED;
+          exec(
+              "UPDATE books SET seen=?,missing=0 WHERE source=? AND instr(url,?)=1",
+              token,
+              src,
+              prefix);
+          exec("UPDATE books SET title=?,seen=?,missing=0 WHERE id=?", title, token, id);
+          return;
+        }
         int manual = c.getInt(7);
         String oldGroup = c.getString(5);
         if (manual == -1)

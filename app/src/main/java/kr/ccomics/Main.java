@@ -776,7 +776,7 @@ public final class Main extends Activity {
           "화면 테마",
           "임시 파일 정리",
           "앱 업데이트 확인",
-          "권 뒤 파일 표기 숨기기 · " + (prefs.getBoolean("hideVolumeTags", true) ? "켜짐" : "꺼짐")
+          "책 이름만 표시 · " + (prefs.getBoolean("hideVolumeTags", true) ? "켜짐" : "꺼짐")
         },
         i -> {
           if (i == 0) refreshSources(false);
@@ -789,7 +789,7 @@ public final class Main extends Activity {
             boolean hide = !prefs.getBoolean("hideVolumeTags", true);
             prefs.edit().putBoolean("hideVolumeTags", hide).apply();
             library(true);
-            toast(hide ? "권 뒤 파일 표기를 숨깁니다." : "권 뒤 파일 표기를 표시합니다.");
+            toast(hide ? "앞뒤 [문구]와 파일 표기를 숨깁니다." : "파일 이름을 그대로 표시합니다.");
           }
           if (i == 4) {
             worker.execute(

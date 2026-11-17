@@ -40,11 +40,26 @@ public class OrderTest {
   @Test
   public void hideOnlyFileTagsFollowingVolumeNumbers() {
     String name = "[개정판] 하늘 2권 (원본) [1500PX]";
-    assertEquals("[개정판] 하늘 2권", Order.shelfTitle(name, true));
+    assertEquals("하늘 2권", Order.shelfTitle(name, true));
     assertEquals(name, Order.shelfTitle(name, false));
-    assertEquals("하늘_02권", Order.shelfTitle("하늘_02권_원본_1500px", true));
+    assertEquals("하늘 02권", Order.shelfTitle("하늘_02권_원본_1500px", true));
     assertEquals("하늘 (원본)", Order.shelfTitle("하늘 (원본)", true));
     assertEquals("하늘 2권 [외전]", Order.shelfTitle("하늘 2권 [외전]", true));
+    assertEquals(
+        "그 비스크 돌은 사랑을 한다", Order.shelfTitle("[완결]【스캔】 그_비스크_돌은_사랑을_한다", true));
+    assertEquals("[완결]", Order.shelfTitle("[완결]", true));
+  }
+
+  @Test
+  public void seriesKeyIgnoresLeadingTagsSpacingAndPunctuation() {
+    String key = Order.seriesKey(Order.series("그 비스크 돌은 사랑을 한다 1권.zip"));
+    assertEquals(key, Order.seriesKey(Order.series("그_비스크_돌은_사랑을_한다_02권.zip")));
+    assertEquals(key, Order.seriesKey(Order.series("[완결] 그 비스크 돌은 사랑을 한다 3권 [원본].zip")));
+    assertEquals(key, Order.seriesKey(Order.series("[스캔][고화질] 그 비스크 돌은, 사랑을 한다! 4권.cbz")));
+    assertEquals(key, Order.seriesKey("그비스크돌은사랑을한다"));
+    assertNotEquals(key, Order.seriesKey("그 비스크 돌은 사랑을 한다 외전"));
+    assertEquals(Order.seriesKey("Re:Zero"), Order.seriesKey("re zero"));
+    assertEquals("1", Order.seriesKey("[1]"));
   }
 
   @Test
