@@ -8,12 +8,15 @@ import android.graphics.drawable.*;
 import android.net.Uri;
 import android.os.*;
 import android.text.*;
+import android.text.style.ForegroundColorSpan;
 import android.util.LruCache;
 import android.view.*;
 import android.widget.*;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 import java.io.*;
 import java.util.*;
@@ -21,6 +24,9 @@ import java.util.concurrent.*;
 import java.util.function.*;
 
 public final class Main extends Activity {
+  static final int THUMB_MIN_DP = 76, THUMB_MAX_DP = 220, THUMB_DEFAULT_DP = 133;
+  static final int SORT_TITLE = 0, SORT_RECENT = 1, SORT_ADDED = 2, SORT_RATING = 3;
+  static final String[] SORT_NAMES = {"제목순", "최근 읽은순", "최근 추가순", "별점순"};
   AppUpdates updates;
   Library db;
   SharedPreferences prefs;
@@ -37,6 +43,8 @@ public final class Main extends Activity {
   FrameLayout frame;
   LinearLayout root;
   GridView grid;
+  ListView shelfList;
+  StarSectionAdapter sectionAdapter;
   Reader reader;
   View overlay, topBar;
   TextView indicator;
@@ -45,14 +53,44 @@ public final class Main extends Activity {
   Map<String, List<Library.Book>> groups = new LinkedHashMap<>();
   String selected = "", shelf = "", query = "", scanMessage = "";
   int filter, requestId, gridIndex, gridOffset, volumeIndex, volumeOffset;
-  boolean busy, loadingBook, dark;
+  boolean busy, loadingBook, dark, readerImmersive;
   int bg, ink, muted, surface, accent;
+
+  void configureEdgeToEdge() {
+    WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+    if (Build.VERSION.SDK_INT >= 29) {
+      getWindow().setStatusBarContrastEnforced(false);
+      getWindow().setNavigationBarContrastEnforced(false);
+    }
+    WindowManager.LayoutParams lp = getWindow().getAttributes();
+    lp.layoutInDisplayCutoutMode =
+        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+    getWindow().setAttributes(lp);
+  }
+
+  void ensureSortDefaults() {
+    if (prefs == null) return;
+    if (prefs.getInt("sortDefaultVersion", 0) < 1) {
+      prefs
+          .edit()
+          .putInt("sort", SORT_RATING)
+          .putBoolean("sortDesc", true)
+          .putInt("sortDefaultVersion", 1)
+          .apply();
+    }
+  }
 
   @Override
   public void onCreate(Bundle state) {
     super.onCreate(state);
+    configureEdgeToEdge();
     db = new Library(getApplicationContext());
     prefs = getSharedPreferences("options", 0);
+    ensureSortDefaults();
+    if (prefs.getInt("renormRules", 0) < Library.RULES) {
+      db.renormalizeBooks();
+      prefs.edit().putInt("renormRules", Library.RULES).apply();
+    }
     updates = new AppUpdates(this);
     if (state != null) {
       selected = state.getString("selected", "");
@@ -78,6 +116,12 @@ public final class Main extends Activity {
       Library.Book b = db.get(state.getLong("reading"));
       if (b != null) open(b);
     }
+  }
+
+  @Override
+  public void onWindowFocusChanged(boolean hasFocus) {
+    super.onWindowFocusChanged(hasFocus);
+    if (hasFocus && reader != null && overlay == null) immersive();
   }
 
   @Override
@@ -217,26 +261,171 @@ public final class Main extends Activity {
     surface = dark ? 0xff292d29 : 0xffe9ece5;
     accent = dark ? 0xffa6c8af : 0xff285c48;
     frame.setBackgroundColor(bg);
-    getWindow().setStatusBarColor(bg);
-    getWindow().setNavigationBarColor(bg);
-    getWindow()
-        .getDecorView()
-        .setSystemUiVisibility(
-            dark
-                ? 0
-                : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+    readerImmersive = false;
+    getWindow().setStatusBarColor(Color.TRANSPARENT);
+    getWindow().setNavigationBarColor(Color.TRANSPARENT);
+    WindowInsetsControllerCompat ctrl =
+        WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+    ctrl.show(WindowInsetsCompat.Type.systemBars());
+    ctrl.setAppearanceLightStatusBars(!dark);
+    ctrl.setAppearanceLightNavigationBars(!dark);
   }
 
   void remember() {
-    if (grid != null && grid.getChildCount() > 0) {
-      if (Boolean.TRUE.equals(grid.getTag())) {
-        volumeIndex = grid.getFirstVisiblePosition();
-        volumeOffset = grid.getChildAt(0).getTop() - grid.getPaddingTop();
+    AbsListView active = grid != null ? grid : shelfList;
+    if (active != null && active.getChildCount() > 0) {
+      if (Boolean.TRUE.equals(active.getTag())) {
+        volumeIndex = active.getFirstVisiblePosition();
+        volumeOffset = active.getChildAt(0).getTop() - active.getPaddingTop();
         return;
       }
-      gridIndex = grid.getFirstVisiblePosition();
-      gridOffset = grid.getChildAt(0).getTop() - grid.getPaddingTop();
+      gridIndex = active.getFirstVisiblePosition();
+      gridOffset = active.getChildAt(0).getTop() - active.getPaddingTop();
     }
+  }
+
+  int currentSort() {
+    ensureSortDefaults();
+    int s = prefs.getInt("sort", SORT_RATING);
+    return s >= 0 && s < SORT_NAMES.length ? s : SORT_RATING;
+  }
+
+  boolean currentSortDesc() {
+    ensureSortDefaults();
+    return prefs.getBoolean("sortDesc", true);
+  }
+
+  String sortLabel(int sort, boolean desc) {
+    int idx = sort >= 0 && sort < SORT_NAMES.length ? sort : SORT_RATING;
+    return SORT_NAMES[idx] + " " + (desc ? "↓" : "↑");
+  }
+
+  static String stars(int rating) {
+    int r = Math.max(0, Math.min(5, rating));
+    StringBuilder sb = new StringBuilder(5);
+    for (int i = 0; i < 5; i++) sb.append(i < r ? '★' : '☆');
+    return sb.toString();
+  }
+
+  SpannableString styledStars(int rating) {
+    int r = Math.max(0, Math.min(5, rating));
+    SpannableString s = new SpannableString(stars(r));
+    int gold = dark ? 0xfff2c14e : 0xffc88a12;
+    if (r > 0) s.setSpan(new ForegroundColorSpan(gold), 0, r, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    if (r < 5) s.setSpan(new ForegroundColorSpan(muted), r, 5, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    return s;
+  }
+
+  int coverWidthDp() {
+    if (prefs.contains("thumbWidthDp")) {
+      return Math.max(
+          THUMB_MIN_DP, Math.min(THUMB_MAX_DP, prefs.getInt("thumbWidthDp", THUMB_DEFAULT_DP)));
+    }
+    int pref = Math.max(0, Math.min(2, prefs.getInt("size", 1)));
+    return new int[] {100, 133, 165}[pref];
+  }
+
+  void applyThumbWidth(int widthDp) {
+    int clamped = Math.max(THUMB_MIN_DP, Math.min(THUMB_MAX_DP, widthDp));
+    prefs.edit().putInt("thumbWidthDp", clamped).apply();
+    if (grid != null) {
+      grid.setColumnWidth(dp(clamped));
+      if (grid.getAdapter() instanceof BaseAdapter) {
+        ((BaseAdapter) grid.getAdapter()).notifyDataSetChanged();
+      }
+      grid.requestLayout();
+    }
+    if (sectionAdapter != null) {
+      sectionAdapter.setThumbWidthDp(clamped);
+    }
+  }
+
+  void showThumbSizeSlider() {
+    int initial = coverWidthDp();
+    LinearLayout box = col();
+    pad(box, 20, 12);
+    LinearLayout header = row();
+    TextView title = label("표지 크기", 16, ink, true);
+    weight(header, title);
+    TextView value = label(initial + "dp", 14, accent, true);
+    header.addView(value);
+    box.addView(header);
+
+    LinearLayout sliderRow = row();
+    pad(sliderRow, 0, 10);
+    sliderRow.addView(label("작게", 12, muted, false));
+    SeekBar bar = new SeekBar(this);
+    bar.setContentDescription("표지 크기 조절 바");
+    bar.setMax(THUMB_MAX_DP - THUMB_MIN_DP);
+    bar.setProgress(initial - THUMB_MIN_DP);
+    LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(0, dp(44), 1);
+    sp.setMargins(dp(10), 0, dp(10), 0);
+    sliderRow.addView(bar, sp);
+    sliderRow.addView(label("크게", 12, muted, false));
+    box.addView(sliderRow);
+
+    bar.setOnSeekBarChangeListener(
+        new SeekBar.OnSeekBarChangeListener() {
+          public void onProgressChanged(SeekBar s, int progress, boolean user) {
+            int w = THUMB_MIN_DP + progress;
+            value.setText(w + "dp");
+            applyThumbWidth(w);
+          }
+
+          public void onStartTrackingTouch(SeekBar s) {}
+
+          public void onStopTrackingTouch(SeekBar s) {}
+        });
+
+    AlertDialog dlg =
+        dialog()
+            .setView(box)
+            .setNeutralButton(
+                "기본 크기",
+                (d, w) -> applyThumbWidth(THUMB_DEFAULT_DP))
+            .setPositiveButton("완료", null)
+            .create();
+    Window win = dlg.getWindow();
+    if (win != null) {
+      win.setGravity(Gravity.BOTTOM);
+      win.setDimAmount(0.12f);
+    }
+    dlg.show();
+  }
+
+  void pickSort() {
+    int current = currentSort();
+    boolean desc = currentSortDesc();
+    String[] items = new String[SORT_NAMES.length];
+    for (int i = 0; i < SORT_NAMES.length; i++) {
+      boolean itemDesc = i == current ? desc : (i != SORT_TITLE);
+      String arrow = itemDesc ? "↓" : "↑";
+      items[i] =
+          i == current
+              ? SORT_NAMES[i] + "  " + arrow + "  (현재 · 다시 누르면 전환)"
+              : SORT_NAMES[i] + "  " + arrow;
+    }
+    dialog()
+        .setTitle("정렬  ·  " + sortLabel(current, desc))
+        .setSingleChoiceItems(
+            items,
+            current,
+            (d, i) -> {
+              boolean nextDesc = i == current ? !desc : (i != SORT_TITLE);
+              prefs.edit().putInt("sort", i).putBoolean("sortDesc", nextDesc).apply();
+              gridIndex = gridOffset = 0;
+              d.dismiss();
+              library(false);
+            })
+        .setNeutralButton(
+            desc ? "오름차순 ↑" : "내림차순 ↓",
+            (d, w) -> {
+              prefs.edit().putBoolean("sortDesc", !desc).apply();
+              gridIndex = gridOffset = 0;
+              library(false);
+            })
+        .setNegativeButton("닫기", null)
+        .show();
   }
 
   final ExecutorService snapshots = Executors.newSingleThreadExecutor();
@@ -251,8 +440,7 @@ public final class Main extends Activity {
           List<Library.Book> all = db.books();
           Map<String, List<Library.Book>> sorted = new LinkedHashMap<>();
           for (Library.Book b : all) sorted.computeIfAbsent(b.grp, k -> new ArrayList<>()).add(b);
-          for (List<Library.Book> group : sorted.values())
-            group.sort((a, b) -> Order.compareVolumes(a.title, b.title));
+          for (List<Library.Book> group : sorted.values()) group.sort(Order::compareBooks);
           runOnUiThread(
               () -> {
                 if (isDestroyed() || token != snapshotId) return;
@@ -265,11 +453,23 @@ public final class Main extends Activity {
 
   void renderLibrary() {
     grid = null;
+    shelfList = null;
+    sectionAdapter = null;
     theme();
     frame.removeAllViews();
     if (!groups.containsKey(selected)) selected = "";
     root = col();
+    ViewCompat.setOnApplyWindowInsetsListener(
+        root,
+        (view, windowInsets) -> {
+          Insets safe =
+              windowInsets.getInsets(
+                  WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+          view.setPadding(safe.left, safe.top, safe.right, safe.bottom);
+          return windowInsets;
+        });
     frame.addView(root, -1, -1);
+    ViewCompat.requestApplyInsets(frame);
     LinearLayout bar = row();
     pad(bar, 8, 3);
     root.addView(bar, -1, dp(54));
@@ -317,13 +517,16 @@ public final class Main extends Activity {
             - tabs.getMeasuredWidth();
     boolean showSearch = available >= dp(176), showAdd = available >= dp(132);
     if (showSearch) icon(bar, "search", "책 검색", ink, this::searchLibrary);
-    if (showFilters)
+    if (showFilters) {
+      int curSort = currentSort();
+      boolean curDesc = currentSortDesc();
       icon(
           bar,
-          "sort",
-          "정렬",
+          curDesc ? "sort_desc" : "sort_asc",
+          "정렬 · " + sortLabel(curSort, curDesc),
           ink,
-          () -> pick("정렬", "sort", new String[] {"제목순", "최근 읽은순", "최근 추가순"}, () -> library(true)));
+          this::pickSort);
+    }
     if (showAdd) icon(bar, "add", "책 추가", ink, this::addMenu);
     icon(
         bar,
@@ -370,7 +573,9 @@ public final class Main extends Activity {
     pull.setColorSchemeColors(accent);
     pull.setProgressBackgroundColorSchemeColor(surface);
     pull.setOnChildScrollUpCallback(
-        (parent, child) -> grid != null && grid.canScrollVertically(-1));
+        (parent, child) ->
+            (grid != null && grid.canScrollVertically(-1))
+                || (shelfList != null && shelfList.canScrollVertically(-1)));
     pull.setOnRefreshListener(
         () -> {
           if (!refreshSources(true)) pull.setRefreshing(false);
@@ -390,6 +595,29 @@ public final class Main extends Activity {
           gridIndex = 0;
           library(false);
         });
+  }
+
+  int groupRating(List<Library.Book> group) {
+    int r = 0;
+    if (group != null) for (Library.Book b : group) r = Math.max(r, b.rating);
+    return Math.max(0, Math.min(5, r));
+  }
+
+  int groupRating(String grp) {
+    List<Library.Book> g = groups.get(grp);
+    if (g != null) return groupRating(g);
+    return db != null ? db.groupRating(grp) : 0;
+  }
+
+  String seriesDisplayName(List<Library.Book> group) {
+    return Order.bestSeriesTitle(group, prefs.getBoolean("hideVolumeTags", true));
+  }
+
+  String volumeTitle(Library.Book b) {
+    List<Library.Book> g = groups.get(b.grp);
+    String seriesName = g != null ? seriesDisplayName(g) : shelfTitle(b.series);
+    return Order.volumeDisplayTitle(
+        seriesName, b.title, b.comicNumber, prefs.getBoolean("hideVolumeTags", true));
   }
 
   void libraryPane(LinearLayout pane) {
@@ -414,7 +642,7 @@ public final class Main extends Activity {
       pad(tx, 12, 0);
       weight(resume, tx);
       tx.addView(label("이어 읽기", 12, accent, true));
-      TextView name = label(recent.title, 16, ink, true);
+      TextView name = label(volumeTitle(recent), 16, ink, true);
       one(name);
       tx.addView(name);
       resume.addView(label((recent.page + 1) + " / " + recent.pages, 12, muted, false));
@@ -423,11 +651,15 @@ public final class Main extends Activity {
     List<List<Library.Book>> list = new ArrayList<>();
     String q = query.toLowerCase(Locale.ROOT);
     for (List<Library.Book> group : groups.values()) {
+      String displayName = seriesDisplayName(group).toLowerCase(Locale.ROOT);
       boolean ok = false;
       for (Library.Book b : group)
         if ((shelf.isEmpty() || shelf.equals(b.shelf))
-            && (b.series.toLowerCase(Locale.ROOT).contains(q)
-                || b.title.toLowerCase(Locale.ROOT).contains(q))
+            && (q.isEmpty()
+                || displayName.contains(q)
+                || b.series.toLowerCase(Locale.ROOT).contains(q)
+                || b.title.toLowerCase(Locale.ROOT).contains(q)
+                || b.comicSeries.toLowerCase(Locale.ROOT).contains(q))
             && (filter == 0
                 || filter == 1 && b.opened > 0 && !b.done
                 || filter == 2 && b.done
@@ -437,11 +669,24 @@ public final class Main extends Activity {
         }
       if (ok) list.add(group);
     }
-    int sort = prefs.getInt("sort", 0);
+    int sort = currentSort();
+    boolean desc = currentSortDesc();
     list.sort(
         (a, b) -> {
-          int n = sort == 0 ? 0 : Long.compare(groupOrder(b, sort), groupOrder(a, sort));
-          return n == 0 ? Order.natural(a.get(0).series, b.get(0).series) : n;
+          String ta = seriesDisplayName(a), tb = seriesDisplayName(b);
+          int n;
+          if (sort == SORT_TITLE) {
+            n = Order.natural(ta, tb);
+            return desc ? -n : n;
+          } else if (sort == SORT_RATING) {
+            n = Integer.compare(groupRating(a), groupRating(b));
+            if (desc) n = -n;
+            return n == 0 ? Order.natural(ta, tb) : n;
+          } else {
+            n = Long.compare(groupOrder(a, sort), groupOrder(b, sort));
+            if (desc) n = -n;
+            return n == 0 ? Order.natural(ta, tb) : n;
+          }
         });
     pane.addView(shelfSummary(list.size()), -1, LinearLayout.LayoutParams.WRAP_CONTENT);
     if (list.isEmpty()) {
@@ -460,19 +705,39 @@ public final class Main extends Activity {
       }
       return;
     }
-    List<CoverItem> covers = new ArrayList<>();
-    for (List<Library.Book> group : list) {
-      Library.Book rep = group.get(0);
-      for (Library.Book b : group)
-        if (b.rep) {
-          rep = b;
-          break;
-        }
-      covers.add(
-          new CoverItem(
-              rep, shelfTitle(rep.series), group.size() + "권" + (rep.fav ? "  ·  즐겨찾기" : "")));
+    if (sort == SORT_RATING) {
+      Map<Integer, List<CoverItem>> buckets = new LinkedHashMap<>();
+      int start = desc ? 5 : 0, end = desc ? -1 : 6, step = desc ? -1 : 1;
+      for (int r = start; r != end; r += step) buckets.put(r, new ArrayList<>());
+      for (List<Library.Book> group : list) {
+        int r = groupRating(group);
+        buckets.get(r).add(makeSeriesCover(group, false));
+      }
+      List<StarSection> sections = new ArrayList<>();
+      for (Map.Entry<Integer, List<CoverItem>> e : buckets.entrySet()) {
+        if (!e.getValue().isEmpty()) sections.add(new StarSection(e.getKey(), e.getValue()));
+      }
+      starSectionList(pane, sections);
+      return;
     }
+    List<CoverItem> covers = new ArrayList<>();
+    for (List<Library.Book> group : list) covers.add(makeSeriesCover(group, true));
     coverGrid(pane, covers, false);
+  }
+
+  CoverItem makeSeriesCover(List<Library.Book> group, boolean showStarInSubtitle) {
+    Library.Book rep = group.get(0);
+    boolean hasFav = false;
+    for (Library.Book b : group) {
+      if (b.rep) rep = b;
+      if (b.fav) hasFav = true;
+    }
+    int rating = groupRating(group);
+    StringBuilder sub = new StringBuilder();
+    sub.append(group.size()).append("권");
+    if (showStarInSubtitle && rating > 0) sub.append("  ·  ★").append(rating);
+    if (hasFav) sub.append("  ·  즐겨찾기");
+    return new CoverItem(rep, seriesDisplayName(group), sub.toString());
   }
 
   static final class CoverItem {
@@ -486,6 +751,223 @@ public final class Main extends Activity {
     }
   }
 
+  static final class StarSection {
+    final int rating;
+    final List<CoverItem> items;
+
+    StarSection(int rating, List<CoverItem> items) {
+      this.rating = rating;
+      this.items = items;
+    }
+  }
+
+  static final class SectionRow {
+    final boolean header;
+    final int rating, count;
+    final List<CoverItem> items;
+
+    SectionRow(int rating, int count) {
+      this.header = true;
+      this.rating = rating;
+      this.count = count;
+      this.items = Collections.emptyList();
+    }
+
+    SectionRow(List<CoverItem> items) {
+      this.header = false;
+      this.rating = -1;
+      this.count = items.size();
+      this.items = items;
+    }
+  }
+
+  final class StarSectionAdapter extends BaseAdapter {
+    final List<StarSection> sections;
+    final List<SectionRow> rows = new ArrayList<>();
+    int widthDp;
+    int availablePx;
+    int cols = 3;
+    int tileWidthPx;
+
+    StarSectionAdapter(List<StarSection> sections, int widthDp, int availablePx) {
+      this.sections = sections;
+      this.widthDp = widthDp;
+      this.availablePx = availablePx;
+      rebuild();
+    }
+
+    void setThumbWidthDp(int newWidthDp) {
+      if (this.widthDp == newWidthDp) return;
+      this.widthDp = newWidthDp;
+      rebuild();
+      notifyDataSetChanged();
+    }
+
+    void setAvailableWidth(int newAvailablePx) {
+      if (newAvailablePx <= 0 || this.availablePx == newAvailablePx) return;
+      this.availablePx = newAvailablePx;
+      rebuild();
+      notifyDataSetChanged();
+    }
+
+    void rebuild() {
+      int spacing = dp(14);
+      int padX = dp(18) * 2;
+      int usable = Math.max(dp(120), availablePx - padX);
+      int desired = dp(widthDp);
+      cols = Math.max(1, (usable + spacing) / Math.max(1, desired + spacing));
+      tileWidthPx = Math.max(dp(60), (usable - spacing * (cols - 1)) / cols);
+      rows.clear();
+      for (StarSection sec : sections) {
+        rows.add(new SectionRow(sec.rating, sec.items.size()));
+        for (int i = 0; i < sec.items.size(); i += cols) {
+          rows.add(new SectionRow(sec.items.subList(i, Math.min(i + cols, sec.items.size()))));
+        }
+      }
+    }
+
+    public int getViewTypeCount() {
+      return 2;
+    }
+
+    public int getItemViewType(int pos) {
+      return rows.get(pos).header ? 0 : 1;
+    }
+
+    public int getCount() {
+      return rows.size();
+    }
+
+    public Object getItem(int pos) {
+      return rows.get(pos);
+    }
+
+    public long getItemId(int pos) {
+      return pos;
+    }
+
+    public boolean isEnabled(int pos) {
+      return false;
+    }
+
+    public View getView(int pos, View recycled, ViewGroup parent) {
+      SectionRow rowData = rows.get(pos);
+      if (rowData.header) {
+        LinearLayout hdr =
+            recycled instanceof LinearLayout && Integer.valueOf(0).equals(recycled.getTag())
+                ? (LinearLayout) recycled
+                : col();
+        if (hdr.getChildCount() == 0) {
+          hdr.setTag(0);
+          View divider = new View(Main.this);
+          divider.setBackgroundColor(surface);
+          LinearLayout.LayoutParams dpLine = new LinearLayout.LayoutParams(-1, dp(1));
+          dpLine.setMargins(dp(18), dp(6), dp(18), dp(8));
+          hdr.addView(divider, dpLine);
+          LinearLayout line = row();
+          pad(line, 18, 4);
+          TextView starText = label("", 18, ink, true);
+          weight(line, starText);
+          TextView countText = label("", 13, muted, true);
+          line.addView(countText);
+          hdr.addView(line);
+        }
+        hdr.getChildAt(0).setVisibility(pos == 0 ? View.GONE : View.VISIBLE);
+        LinearLayout line = (LinearLayout) hdr.getChildAt(1);
+        ((TextView) line.getChildAt(0)).setText(styledStars(rowData.rating));
+        ((TextView) line.getChildAt(1)).setText(rowData.count + "작품");
+        return hdr;
+      }
+      LinearLayout rowView =
+          recycled instanceof LinearLayout && Integer.valueOf(1).equals(recycled.getTag())
+              ? (LinearLayout) recycled
+              : row();
+      rowView.setTag(1);
+      rowView.setGravity(Gravity.TOP);
+      rowView.setPadding(dp(18), dp(6), dp(18), dp(12));
+      int spacing = dp(14);
+      int coverH = (int) (tileWidthPx * 1.42f);
+      if (rowView.getChildCount() != cols) {
+        rowView.removeAllViews();
+        for (int c = 0; c < cols; c++) {
+          LinearLayout tile = col();
+          tile.addView(new ImageView(Main.this));
+          tile.addView(label("", 15, ink, true));
+          tile.addView(label("", 12, muted, false));
+          LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1);
+          if (c > 0) lp.leftMargin = spacing;
+          rowView.addView(tile, lp);
+        }
+      }
+      for (int c = 0; c < cols; c++) {
+        LinearLayout tile = (LinearLayout) rowView.getChildAt(c);
+        if (c < rowData.items.size()) {
+          CoverItem item = rowData.items.get(c);
+          tile.setVisibility(View.VISIBLE);
+          ImageView img = (ImageView) tile.getChildAt(0);
+          img.setLayoutParams(new LinearLayout.LayoutParams(-1, coverH));
+          img.setBackgroundColor(surface);
+          loadCover(img, item.book);
+          TextView name = (TextView) tile.getChildAt(1);
+          one(name);
+          name.setText(item.title);
+          name.setPadding(0, dp(8), 0, dp(3));
+          TextView sub = (TextView) tile.getChildAt(2);
+          one(sub);
+          sub.setText(item.subtitle);
+          tile.setOnClickListener(
+              v -> {
+                remember();
+                volumeIndex = volumeOffset = 0;
+                selected = item.book.grp;
+                library(false);
+              });
+          tile.setOnLongClickListener(
+              v -> {
+                manage(item.book);
+                return true;
+              });
+        } else {
+          tile.setVisibility(View.INVISIBLE);
+          tile.setOnClickListener(null);
+          tile.setOnLongClickListener(null);
+        }
+      }
+      return rowView;
+    }
+  }
+
+  void starSectionList(LinearLayout pane, List<StarSection> sections) {
+    shelfList = new ListView(this);
+    shelfList.setTag(false);
+    shelfList.setDivider(null);
+    shelfList.setDividerHeight(0);
+    shelfList.setSelector(new ColorDrawable(Color.TRANSPARENT));
+    shelfList.setClipToPadding(false);
+    shelfList.setPadding(0, dp(2), 0, dp(22));
+    int initialWidth = dp(getResources().getConfiguration().screenWidthDp);
+    sectionAdapter = new StarSectionAdapter(sections, coverWidthDp(), initialWidth);
+    shelfList.setAdapter(sectionAdapter);
+    final ListView listView = shelfList;
+    final StarSectionAdapter adapter = sectionAdapter;
+    listView.addOnLayoutChangeListener(
+        (v, left, top, right, bottom, ol, ot, or, ob) -> {
+          int w = right - left;
+          if (w > 0 && w != or - ol) adapter.setAvailableWidth(w);
+        });
+    pane.addView(listView, -1, -1);
+    listView.setSelectionFromTop(gridIndex, gridOffset);
+  }
+
+  int gridTileWidth(GridView g) {
+    int desired = dp(coverWidthDp());
+    int width = g.getWidth() - g.getPaddingLeft() - g.getPaddingRight();
+    if (width <= 0) return g.getColumnWidth() > 0 ? g.getColumnWidth() : desired;
+    int spacing = dp(14);
+    int cols = Math.max(1, (width + spacing) / Math.max(1, desired + spacing));
+    return Math.max(dp(60), (width - spacing * (cols - 1)) / cols);
+  }
+
   void coverGrid(LinearLayout pane, List<CoverItem> list, boolean volumes) {
     grid = new GridView(this);
     grid.setTag(volumes);
@@ -496,7 +978,7 @@ public final class Main extends Activity {
     grid.setClipToPadding(false);
     final GridView g = grid;
     pane.addView(g, -1, -1);
-    int pref = prefs.getInt("size", 1), width = new int[] {100, 133, 165}[pref];
+    int width = coverWidthDp();
     g.setColumnWidth(dp(width));
     g.setNumColumns(GridView.AUTO_FIT);
     g.setAdapter(
@@ -523,7 +1005,7 @@ public final class Main extends Activity {
             CoverItem item = list.get(pos);
             Library.Book rep = item.book;
             ImageView img = (ImageView) tile.getChildAt(0);
-            int cw = g.getColumnWidth() > 0 ? g.getColumnWidth() : dp(width);
+            int cw = gridTileWidth(g);
             img.setLayoutParams(new LinearLayout.LayoutParams(-1, (int) (cw * 1.42)));
             img.setBackgroundColor(surface);
             loadCover(img, rep);
@@ -557,7 +1039,7 @@ public final class Main extends Activity {
 
   long groupOrder(List<Library.Book> group, int sort) {
     long n = 0;
-    for (Library.Book b : group) n = Math.max(n, sort == 1 ? b.opened : b.id);
+    for (Library.Book b : group) n = Math.max(n, sort == SORT_RECENT ? b.opened : b.id);
     return n;
   }
 
@@ -592,7 +1074,8 @@ public final class Main extends Activity {
 
   void detailPane(LinearLayout pane) {
     List<Library.Book> volumes = groups.get(selected);
-    String name = shelfTitle(volumes.get(0).series);
+    String name = seriesDisplayName(volumes);
+    boolean hideTags = prefs.getBoolean("hideVolumeTags", true);
     LinearLayout title = row();
     pad(title, 16, 10);
     pane.addView(title);
@@ -612,7 +1095,9 @@ public final class Main extends Activity {
                       : b.opened > 0
                           ? (b.page + 1) + " / " + b.pages + "쪽"
                           : b.pages > 0 ? b.pages + "쪽" : "색인 대기";
-      covers.add(new CoverItem(b, shelfTitle(b.title), status));
+      covers.add(
+          new CoverItem(
+              b, Order.volumeDisplayTitle(name, b.title, b.comicNumber, hideTags), status));
     }
     coverGrid(pane, covers, true);
   }
@@ -778,7 +1263,7 @@ public final class Main extends Activity {
         new String[] {
           "연결 폴더 다시 읽기",
           "책장 관리",
-          "표지 크기",
+          "표지 크기 · " + coverWidthDp() + "dp",
           "화면 테마",
           "임시 파일 정리",
           "앱 업데이트 확인",
@@ -787,7 +1272,7 @@ public final class Main extends Activity {
         i -> {
           if (i == 0) refreshSources(false);
           if (i == 1) shelves();
-          if (i == 2) pick("표지 크기", "size", new String[] {"작게", "기본", "크게"}, () -> library(true));
+          if (i == 2) showThumbSizeSlider();
           if (i == 3)
             pick("화면 테마", "theme", new String[] {"기기 설정", "밝게", "어둡게"}, () -> library(true));
           if (i == 5) updates.check(true);
@@ -850,10 +1335,38 @@ public final class Main extends Activity {
         });
   }
 
+  void pickRating(Library.Book b) {
+    int current = groupRating(b.grp);
+    String[] labels = {
+      "★★★★★  5점",
+      "★★★★☆  4점",
+      "★★★☆☆  3점",
+      "★★☆☆☆  2점",
+      "★☆☆☆☆  1점",
+      "☆☆☆☆☆  0점"
+    };
+    int checked = 5 - Math.max(0, Math.min(5, current));
+    dialog()
+        .setTitle("별점 설정")
+        .setSingleChoiceItems(
+            labels,
+            checked,
+            (d, i) -> {
+              int next = 5 - i;
+              db.exec("UPDATE books SET rating=? WHERE grp=?", next, b.grp);
+              d.dismiss();
+              library(true);
+            })
+        .setNegativeButton("닫기", null)
+        .show();
+  }
+
   void manage(Library.Book b) {
+    int rating = groupRating(b.grp);
     choices(
-        b.title,
+        volumeTitle(b),
         new String[] {
+          "별점 설정  ·  " + stars(rating),
           "표지 변경",
           "시리즈 대표 표지로 지정",
           b.fav ? "즐겨찾기 해제" : "즐겨찾기",
@@ -865,12 +1378,16 @@ public final class Main extends Activity {
         },
         i -> {
           if (i == 0) {
+            pickRating(b);
+            return;
+          }
+          if (i == 1) {
             chooseCover(b);
             return;
           }
-          if (i == 1) db.exec("UPDATE books SET rep=(id=?) WHERE grp=?", b.id, b.grp);
-          if (i == 2) db.exec("UPDATE books SET fav=? WHERE id=?", b.fav ? 0 : 1, b.id);
-          if (i == 3)
+          if (i == 2) db.exec("UPDATE books SET rep=(id=?) WHERE grp=?", b.id, b.grp);
+          if (i == 3) db.exec("UPDATE books SET fav=? WHERE id=?", b.fav ? 0 : 1, b.id);
+          if (i == 4)
             db.exec(
                 "UPDATE books SET done=?,opened=CASE WHEN ? THEN 0 ELSE opened END,page=CASE WHEN ?"
                     + " THEN 0 ELSE page END WHERE id=?",
@@ -878,7 +1395,7 @@ public final class Main extends Activity {
                 b.done ? 1 : 0,
                 b.done ? 1 : 0,
                 b.id);
-          if (i == 4) {
+          if (i == 5) {
             List<String> list = db.strings("SELECT name FROM shelves ORDER BY name");
             list.add(0, "책장 지정 해제");
             list.add("새 책장…");
@@ -905,7 +1422,7 @@ public final class Main extends Activity {
                 });
             return;
           }
-          if (i == 5) {
+          if (i == 6) {
             input(
                 "시리즈명 변경",
                 b.series,
@@ -917,7 +1434,7 @@ public final class Main extends Activity {
                 });
             return;
           }
-          if (i == 6) {
+          if (i == 7) {
             List<String> keys = new ArrayList<>(groups.keySet());
             keys.remove(b.grp);
             if (keys.isEmpty()) {
@@ -925,25 +1442,29 @@ public final class Main extends Activity {
               return;
             }
             String[] names = new String[keys.size()];
-            for (int k = 0; k < names.length; k++) names[k] = groups.get(keys.get(k)).get(0).series;
+            for (int k = 0; k < names.length; k++)
+              names[k] = seriesDisplayName(groups.get(keys.get(k)));
             choices(
                 "합칠 시리즈",
                 names,
                 k -> {
                   Library.Book dest = groups.get(keys.get(k)).get(0);
-                  db.exec("UPDATE books SET manualGroup=1 WHERE grp=?", dest.grp);
+                  int mergedRating = Math.max(groupRating(dest.grp), groupRating(b.grp));
+                  db.exec("UPDATE books SET manualGroup=1,rating=? WHERE grp=?", mergedRating, dest.grp);
                   db.exec(
-                      "UPDATE books SET manualGroup=1,grp=?,series=?,shelf=?,rep=0 WHERE grp=?",
+                      "UPDATE books SET manualGroup=1,grp=?,series=?,shelf=?,rating=?,rep=0 WHERE"
+                          + " grp=?",
                       dest.grp,
                       dest.series,
                       dest.shelf,
+                      mergedRating,
                       b.grp);
                   selected = dest.grp;
                   library(true);
                 });
             return;
           }
-          if (i == 7) {
+          if (i == 8) {
             db.exec(
                 "UPDATE books SET manualGroup=1,grp=?,series=title,rep=0 WHERE id=?",
                 "manual:" + b.id,
@@ -1071,6 +1592,8 @@ public final class Main extends Activity {
                   scanMessage = "";
                   if (reader != null) reader.close();
                   grid = null;
+                  shelfList = null;
+                  sectionAdapter = null;
                   frame.removeAllViews();
                   reader = new Reader(this, a, b);
                   frame.addView(reader, -1, -1);
@@ -1108,8 +1631,10 @@ public final class Main extends Activity {
         bar,
         (view, windowInsets) -> {
           Insets safe =
-              windowInsets.getInsets(
-                  WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+              Insets.max(
+                  windowInsets.getInsets(
+                      WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()),
+                  windowInsets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars()));
           view.setPadding(
               edge + safe.left,
               vertical + (top ? safe.top : 0),
@@ -1120,13 +1645,23 @@ public final class Main extends Activity {
   }
 
   void immersive() {
-    getWindow()
-        .getDecorView()
-        .setSystemUiVisibility(
-            READER_LAYOUT
-                | View.SYSTEM_UI_FLAG_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+    readerImmersive = true;
+    WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+    getWindow().setStatusBarColor(Color.TRANSPARENT);
+    getWindow().setNavigationBarColor(Color.TRANSPARENT);
+    WindowInsetsControllerCompat ctrl =
+        WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+    ctrl.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+    ctrl.hide(WindowInsetsCompat.Type.systemBars());
+    if (Build.VERSION.SDK_INT < 30) {
+      getWindow()
+          .getDecorView()
+          .setSystemUiVisibility(
+              READER_LAYOUT
+                  | View.SYSTEM_UI_FLAG_FULLSCREEN
+                  | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                  | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+    }
   }
 
   void toggleReaderMenu() {
@@ -1138,12 +1673,14 @@ public final class Main extends Activity {
       immersive();
       return;
     }
+    readerImmersive = false;
     int fg = 0xfff6f7f4;
     LinearLayout top = row();
+    top.setClickable(true);
     top.setBackgroundColor(0xee202421);
     pad(top, 6, 2);
     icon(top, "back", "서재로", fg, this::leaveReader);
-    TextView title = label(reader.book.title, 16, fg, true);
+    TextView title = label(volumeTitle(reader.book), 16, fg, true);
     one(title);
     weight(top, title);
     directionButton = action("", this::pickDirection);
@@ -1154,6 +1691,7 @@ public final class Main extends Activity {
     insetMenu(top, true);
     frame.addView(top, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP));
     LinearLayout bottom = row();
+    bottom.setClickable(true);
     bottom.setLayoutDirection(View.LAYOUT_DIRECTION_LTR);
     pad(bottom, 8, 2);
     bottom.setBackgroundColor(0xee202421);
@@ -1193,9 +1731,18 @@ public final class Main extends Activity {
     insetMenu(bottom, false);
     overlay = bottom;
     frame.addView(bottom, new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
-    getWindow().setStatusBarColor(0xff202421);
-    getWindow().setNavigationBarColor(0xff202421);
-    getWindow().getDecorView().setSystemUiVisibility(READER_LAYOUT);
+    // Edge-to-edge를 유지해 일반 세로 모드에서도 네비게이션 바가 만화 화면을 밀어올리지 않고 위에 겹쳐 표시된다.
+    WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+    getWindow().setStatusBarColor(Color.TRANSPARENT);
+    getWindow().setNavigationBarColor(Color.TRANSPARENT);
+    WindowInsetsControllerCompat ctrl =
+        WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+    ctrl.setAppearanceLightStatusBars(false);
+    ctrl.setAppearanceLightNavigationBars(false);
+    ctrl.show(WindowInsetsCompat.Type.systemBars());
+    if (Build.VERSION.SDK_INT < 30) {
+      getWindow().getDecorView().setSystemUiVisibility(READER_LAYOUT);
+    }
     ViewCompat.requestApplyInsets(frame);
     readerStatus();
   }
@@ -1302,9 +1849,19 @@ public final class Main extends Activity {
     pad(count, 20, 0);
     count.setMinimumHeight(dp(48));
 
-    weight(
-        count,
-        label((query.isEmpty() ? "작품" : "‘" + query + "’ 검색 결과") + "  " + works, 14, muted, true));
+    TextView info =
+        label(
+            (query.isEmpty() ? "작품" : "‘" + query + "’ 검색 결과")
+                + "  "
+                + works
+                + "  ·  "
+                + sortLabel(currentSort(), currentSortDesc()),
+            14,
+            muted,
+            true);
+    one(info);
+    info.setOnClickListener(v -> pickSort());
+    weight(count, info);
     if (!query.isEmpty())
       count.addView(
           action(

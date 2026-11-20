@@ -189,4 +189,36 @@ public class BundleTest {
     assertEquals(3, groups.size());
     lib.close();
   }
+
+  @Test
+  public void comicInfoXmlImprovesSeriesAndVolumeRecognition() throws Exception {
+    Context ctx = RuntimeEnvironment.getApplication();
+    File file = new File(ctx.getCacheDir(), "007.cbz");
+    String xml =
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+            + "<ComicInfo><Series>나루토</Series><Number>007</Number></ComicInfo>";
+    try (ZipArchiveOutputStream zip = new ZipArchiveOutputStream(file)) {
+      put(zip, "ComicInfo.xml", xml.getBytes("UTF-8"), false);
+      put(zip, "001.jpg", new byte[] {1, 2, 3}, false);
+    }
+    String url = android.net.Uri.fromFile(file).toString();
+    try (Archive a = new Archive(ctx, url, null)) {
+      assertNotNull(a.comicInfo);
+      assertEquals("나루토", a.comicInfo.series);
+      assertEquals("007", a.comicInfo.number);
+      try (Library lib = new Library(ctx)) {
+        List<Long> pending = new ArrayList<>();
+        lib.record(1, url, "007.cbz", "primary:Download/스캔본", file.length(), 1, 1, pending);
+        Library.Book b = lib.get(pending.get(0));
+        lib.applyComicInfo(b, a);
+        Library.Book updated = lib.get(b.id);
+        assertEquals("나루토", updated.series);
+        assertEquals("series:나루토", updated.grp);
+        assertEquals("007", updated.comicNumber);
+        assertEquals(
+            "나루토 7권",
+            Order.volumeDisplayTitle(updated.series, updated.title, updated.comicNumber, true));
+      }
+    }
+  }
 }

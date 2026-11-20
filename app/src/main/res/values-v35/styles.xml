@@ -1,6 +1,12 @@
-<resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
-<item name="android:fontFamily">sans</item><item name="android:colorAccent">#236553</item>
-<item name="android:windowLightStatusBar">true</item><item name="android:statusBarColor">#F7F6F1</item>
-<item name="android:navigationBarColor">#192823</item><item name="android:windowActionModeOverlay">true</item>
-<item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
-</style></resources>
+<resources>
+  <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+    <item name="android:fontFamily">sans</item>
+    <item name="android:colorAccent">#236553</item>
+    <item name="android:windowLightStatusBar">true</item>
+    <item name="android:statusBarColor">@android:color/transparent</item>
+    <item name="android:navigationBarColor">@android:color/transparent</item>
+    <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+    <item name="android:windowActionModeOverlay">true</item>
+    <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+  </style>
+</resources>

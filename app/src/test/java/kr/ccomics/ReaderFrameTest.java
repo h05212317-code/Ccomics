@@ -175,6 +175,14 @@ public class ReaderFrameTest {
   public void seekBarTouchFollowsDirection() {
     host.reader = reader;
     host.frame = new android.widget.FrameLayout(host);
+    host.frame.addView(reader, -1, -1);
+    int width = host.dp(320), screenHeight = host.dp(600);
+    host.frame.measure(
+        android.view.View.MeasureSpec.makeMeasureSpec(width, 1073741824),
+        android.view.View.MeasureSpec.makeMeasureSpec(screenHeight, 1073741824));
+    host.frame.layout(0, 0, width, screenHeight);
+    int readerHeightBefore = reader.getHeight();
+    int readerTopBefore = reader.getTop();
     host.toggleReaderMenu();
     android.view.ViewGroup bar = (android.view.ViewGroup) host.seek.getParent();
     assertSame(host.overlay, bar);
@@ -182,11 +190,8 @@ public class ReaderFrameTest {
     assertEquals(host.seek, bar.getChildAt(1));
     assertEquals("책갈피", ((android.widget.TextView) bar.getChildAt(2)).getText());
     assertEquals("보기 설정", ((android.widget.TextView) bar.getChildAt(3)).getText());
-    assertEquals(
-        0,
-        host.getWindow().getDecorView().getSystemUiVisibility()
-            & android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
-    int width = host.dp(320), height = host.dp(60);
+    assertFalse(host.readerImmersive);
+    int height = host.dp(60);
     bar.measure(
         android.view.View.MeasureSpec.makeMeasureSpec(width, 1073741824),
         android.view.View.MeasureSpec.makeMeasureSpec(height, 1073741824));
@@ -216,16 +221,17 @@ public class ReaderFrameTest {
                 android.graphics.Insets.of(0, 0, 0, 52))
             .setVisible(android.view.WindowInsets.Type.systemBars(), true)
             .build();
+    host.frame.dispatchApplyWindowInsets(insets);
     bar.dispatchApplyWindowInsets(insets);
     host.topBar.dispatchApplyWindowInsets(insets);
     assertEquals(host.dp(2) + 52, bar.getPaddingBottom());
     assertEquals(host.dp(2) + 24, host.topBar.getPaddingTop());
+    // 상·하단 바 표시 후에도 만화 뷰(reader)의 크기와 위치가 밀리지 않아야 한다.
+    assertEquals(readerHeightBefore, reader.getHeight());
+    assertEquals(readerTopBefore, reader.getTop());
     host.toggleReaderMenu();
     assertNull(host.overlay);
-    assertNotEquals(
-        0,
-        host.getWindow().getDecorView().getSystemUiVisibility()
-            & android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
+    assertTrue(host.readerImmersive);
   }
 
   @Test
@@ -250,13 +256,19 @@ public class ReaderFrameTest {
   public void wideSeriesScreenUsesTheSameCoverGridAsLibrary() {
     host.frame = new android.widget.FrameLayout(host);
     host.setContentView(host.frame);
+    host.prefs
+        .edit()
+        .putInt("sortDefaultVersion", 1)
+        .putInt("sort", Main.SORT_TITLE)
+        .putBoolean("sortDesc", false)
+        .apply();
     host.db.exec(
         "INSERT INTO books(id,title,grp,series,pages) VALUES(2,'Test 02','Test','Test',10)");
     host.db.exec("UPDATE books SET series='Test' WHERE id=1");
     host.books = host.db.books();
     host.groups.put("Test", host.books);
     for (int size = 0; size < 3; size++) {
-      host.prefs.edit().putInt("size", size).apply();
+      host.prefs.edit().remove("thumbWidthDp").putInt("size", size).apply();
       host.selected = "";
       host.renderLibrary();
       int width = host.grid.getRequestedColumnWidth();
@@ -269,6 +281,53 @@ public class ReaderFrameTest {
           (android.view.ViewGroup) host.root.getChildAt(host.root.getChildCount() - 1);
       assertEquals(1, body.getChildCount());
     }
+    // 바(슬라이더) 조절 즉시 UI 반영 테스트 (재실행 없음)
+    host.applyThumbWidth(180);
+    assertEquals(host.dp(180), host.grid.getRequestedColumnWidth());
+    assertEquals(180, host.prefs.getInt("thumbWidthDp", -1));
+  }
+
+  @Test
+  public void starRatingSortDefaultsDescendingAndGroupsByStarSections() {
+    host.frame = new android.widget.FrameLayout(host);
+    host.setContentView(host.frame);
+    host.prefs.edit().clear().apply();
+    assertEquals(Main.SORT_RATING, host.currentSort());
+    assertTrue(host.currentSortDesc());
+    assertEquals("별점순 ↓", host.sortLabel(host.currentSort(), host.currentSortDesc()));
+
+    host.db.exec("UPDATE books SET title='나루토 001권',series='나루토',grp='series:나루토',rating=5 WHERE id=1");
+    host.db.exec(
+        "INSERT INTO books(id,title,series,grp,rating,pages) VALUES(2,'원피스 1권','원피스','series:원피스',3,10)");
+    host.db.exec(
+        "INSERT INTO books(id,title,series,grp,rating,pages) VALUES(3,'블리치 1권','블리치','series:블리치',0,10)");
+    host.books = host.db.books();
+    host.groups.clear();
+    for (Library.Book b : host.books)
+      host.groups.computeIfAbsent(b.grp, k -> new java.util.ArrayList<>()).add(b);
+
+    host.selected = "";
+    host.renderLibrary();
+    assertNotNull(host.shelfList);
+    assertNotNull(host.sectionAdapter);
+    assertEquals(3, host.sectionAdapter.sections.size());
+    assertEquals(5, host.sectionAdapter.sections.get(0).rating);
+    assertEquals(3, host.sectionAdapter.sections.get(1).rating);
+    assertEquals(0, host.sectionAdapter.sections.get(2).rating);
+    assertEquals("★★★★★", Main.stars(5));
+    assertEquals("★★★☆☆", Main.stars(3));
+    assertEquals("☆☆☆☆☆", Main.stars(0));
+
+    // 슬라이더 크기 변경 시 별점 섹션 어댑터도 즉시 반영
+    host.applyThumbWidth(170);
+    assertEquals(170, host.sectionAdapter.widthDp);
+
+    // 역방향(오름차순 ↑) 전환 시 0점 → 3점 → 5점 순서
+    host.prefs.edit().putBoolean("sortDesc", false).apply();
+    host.renderLibrary();
+    assertEquals(0, host.sectionAdapter.sections.get(0).rating);
+    assertEquals(3, host.sectionAdapter.sections.get(1).rating);
+    assertEquals(5, host.sectionAdapter.sections.get(2).rating);
   }
 
   Bitmap draw() {

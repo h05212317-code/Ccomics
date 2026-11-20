@@ -41,6 +41,22 @@ final class ToolsIcon extends View {
         line(c, 4, 12, 16, 12);
         line(c, 4, 17, 12, 17);
         break;
+      case "sort_desc":
+        line(c, 3, 7, 14, 7);
+        line(c, 3, 12, 11, 12);
+        line(c, 3, 17, 8, 17);
+        line(c, 17, 6, 17, 18);
+        line(c, 14, 15, 17, 18);
+        line(c, 20, 15, 17, 18);
+        break;
+      case "sort_asc":
+        line(c, 3, 7, 14, 7);
+        line(c, 3, 12, 11, 12);
+        line(c, 3, 17, 8, 17);
+        line(c, 17, 18, 17, 6);
+        line(c, 14, 9, 17, 6);
+        line(c, 20, 9, 17, 6);
+        break;
       case "back":
         line(c, 5, 12, 19, 12);
         line(c, 5, 12, 11, 6);

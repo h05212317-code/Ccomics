@@ -307,6 +307,64 @@ final class Archive implements Closeable {
 
   ZipFile outer;
   File innerSpool;
+  ComicInfo comicInfo;
+
+  /** ZIP 내부 ComicInfo.xml에서 추출한 작품 메타데이터 (Bomulseom ComicInfoParser 규칙). */
+  static final class ComicInfo {
+    final String series, title, number;
+
+    ComicInfo(String series, String title, String number) {
+      this.series = series == null ? "" : series.trim();
+      this.title = title == null ? "" : title.trim();
+      this.number = number == null ? "" : number.trim();
+    }
+
+    boolean hasData() {
+      return !series.isEmpty() || !title.isEmpty() || !number.isEmpty();
+    }
+  }
+
+  static ComicInfo parseComicInfo(InputStream in) {
+    try {
+      org.xmlpull.v1.XmlPullParser parser = android.util.Xml.newPullParser();
+      parser.setFeature(org.xmlpull.v1.XmlPullParser.FEATURE_PROCESS_NAMESPACES, false);
+      parser.setInput(in, "UTF-8");
+      String series = "", title = "", number = "", volume = "";
+      String tag = null;
+      int event = parser.getEventType();
+      while (event != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {
+        if (event == org.xmlpull.v1.XmlPullParser.START_TAG) {
+          tag = parser.getName();
+        } else if (event == org.xmlpull.v1.XmlPullParser.TEXT && tag != null) {
+          String text = parser.getText();
+          if (text != null) {
+            text = text.trim();
+            if (!text.isEmpty()) {
+              if ("Series".equalsIgnoreCase(tag) && series.isEmpty()) series = text;
+              else if ("Title".equalsIgnoreCase(tag) && title.isEmpty()) title = text;
+              else if ("Number".equalsIgnoreCase(tag) && number.isEmpty()) number = text;
+              else if ("Volume".equalsIgnoreCase(tag) && volume.isEmpty()) volume = text;
+            }
+          }
+        } else if (event == org.xmlpull.v1.XmlPullParser.END_TAG) {
+          tag = null;
+        }
+        event = parser.next();
+      }
+      String num = !number.isEmpty() ? number : volume;
+      ComicInfo info = new ComicInfo(series, title, num);
+      return info.hasData() ? info : null;
+    } catch (Exception ignored) {
+      return null;
+    }
+  }
+
+  private static boolean isComicInfoName(String entryName) {
+    if (entryName == null) return false;
+    String p = entryName.replace('\\', '/');
+    String base = p.substring(p.lastIndexOf('/') + 1);
+    return "comicinfo.xml".equalsIgnoreCase(base);
+  }
 
   Archive(Context ctx, String address, CIFSContext server) throws Exception {
     SeekableByteChannel channel;
@@ -347,12 +405,19 @@ final class Archive implements Closeable {
       }
       zip = zipFile(channel);
       List<ZipArchiveEntry> volumes = new ArrayList<>();
+      ZipArchiveEntry comicInfoEntry = null;
       long imageBytes = 0, volumeBytes = 0;
       Enumeration<ZipArchiveEntry> all = zip.getEntries();
       while (all.hasMoreElements()) {
         ZipArchiveEntry e = all.nextElement();
         if (e.isDirectory()) continue;
         if (folder && !e.getName().startsWith(entry)) continue;
+        if (comicInfoEntry == null
+            && isComicInfoName(e.getName())
+            && e.getSize() > 0
+            && e.getSize() <= (1L << 20)) {
+          comicInfoEntry = e;
+        }
         if (Order.image(e.getName())) {
           pages.add(e);
           imageBytes += Math.max(0, e.getSize());
@@ -373,6 +438,12 @@ final class Archive implements Closeable {
       }
       pages.sort((a, b) -> Order.natural(a.getName(), b.getName()));
       if (pages.isEmpty()) throw new IOException("JPEG, PNG, WebP 이미지가 없습니다.");
+      if (comicInfoEntry != null && zip.canReadEntryData(comicInfoEntry)) {
+        try (InputStream in = limited(comicInfoEntry)) {
+          comicInfo = parseComicInfo(in);
+        } catch (Exception ignored) {
+        }
+      }
       int cover = 0;
       for (int i = 1; i < pages.size(); i++)
         if (Order.coverRank(name(i)) < Order.coverRank(name(cover))) cover = i;

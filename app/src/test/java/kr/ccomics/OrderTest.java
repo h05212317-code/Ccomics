@@ -46,10 +46,61 @@ public class OrderTest {
     assertEquals("Atlas", Order.series("Atlas 10.cbz"));
     assertEquals("하늘 길", Order.series("하늘_길_제３권_완결_원본_1500px.zip"));
     assertEquals("하늘 길", Order.series("하늘 길 2권 (AI번역)[1500PX].zip"));
-    assertEquals("[개정판] 하늘", Order.series("[개정판] 하늘 1권.zip"));
+    assertEquals("하늘", Order.series("[개정판] 하늘 1권.zip"));
     assertEquals("하늘 2099", Order.series("하늘 2099.zip"));
     assertTrue(Order.compareVolumes("하늘 Vol.2", "하늘 11권 [원본]") < 0);
     assertEquals("AKIRA", Order.series("AKIRA.zip"));
+  }
+
+  @Test
+  public void mlsAndBomulseomFilenameRecognitionAndUnifiedVolumeTitles() {
+    // Bomulseom 중간 노이즈 단어 + MLS 완결/확장 패턴 인식
+    assertEquals("나루토", Order.series("나루토_원본_03.zip"));
+    assertEquals(3, Order.volume("나루토_원본_03.zip").number);
+    assertEquals("원피스", Order.series("원피스_공금_02.zip"));
+    assertEquals(2, Order.volume("원피스_공금_02.zip").number);
+    assertEquals("나루토", Order.series("나루토 [완결] 01권.zip"));
+    assertEquals(1, Order.volume("나루토 [완결] 01권.zip").number);
+    assertEquals("나루토", Order.series("나루토 01권완.zip"));
+    assertEquals(1, Order.volume("나루토 01권완.zip").number);
+    assertEquals("나루토", Order.series("[원본] 나루토 1권.zip"));
+    assertEquals("나루토", Order.series("나루토01권.zip"));
+    assertEquals("나루토", Order.series("나루토001권.zip"));
+    assertEquals("나루토", Order.series("나루토_010권_고화질.cbz"));
+    assertEquals("나루토", Order.series("나루토 100권 (AI번역)[1500px].zip"));
+    assertEquals(100, Order.volume("나루토 100권 (AI번역)[1500px].zip").number);
+    assertEquals("죠죠 2부", Order.series("죠죠 2부 01권.zip"));
+    assertEquals(1, Order.volume("죠죠 2부 01권.zip").number);
+    assertEquals("작품명", Order.series("작품명 상권.zip"));
+    assertEquals("상", Order.volume("작품명 상권.zip").partLabel);
+    assertTrue(Order.compareVolumes("작품명 상권.zip", "작품명 하권.zip") < 0);
+    assertTrue(Order.compareVolumes("나루토 1권.zip", "나루토 1.5권.zip") < 0);
+    assertTrue(Order.compareVolumes("나루토 1.5권.zip", "나루토 2권.zip") < 0);
+
+    // 내부 책장 권 제목 통일: 나루토 1권, 나루토 2권, ..., 나루토 10권, ..., 나루토 100권
+    String[] rawNaruto = {
+      "[원본] 나루토 1권",
+      "나루토01권",
+      "나루토001권",
+      "나루토_원본_001",
+      "[완결] 나루토 Vol.01 [1500px]"
+    };
+    for (String r : rawNaruto) {
+      assertEquals(r, "나루토 1권", Order.volumeDisplayTitle("나루토", r, "", true));
+    }
+    assertEquals("나루토 2권", Order.volumeDisplayTitle("나루토", "나루토_002권_스캔본", "", true));
+    assertEquals("나루토 10권", Order.volumeDisplayTitle("나루토", "[원본] 나루토010권", "", true));
+    assertEquals("나루토 100권", Order.volumeDisplayTitle("나루토", "나루토 100권 [고화질]", "", true));
+    assertEquals("나루토 1.5권", Order.volumeDisplayTitle("나루토", "나루토 01.5권", "", true));
+    assertEquals("나루토 2권 [외전]", Order.volumeDisplayTitle("나루토", "나루토 02권 [외전]", "", true));
+    assertEquals("나루토 상권", Order.volumeDisplayTitle("나루토", "나루토 상", "", true));
+    assertEquals("나루토 7권", Order.volumeDisplayTitle("나루토", "007", "07", true));
+    assertEquals("[원본] 나루토 1권", Order.volumeDisplayTitle("나루토", "[원본] 나루토 1권", "", false));
+
+    // MLS 스마트 상위 폴더 인식 (스캔본/고화질/Download 등 무의미 폴더 건너뛰기)
+    assertEquals("나루토", Order.resolveFolderSeries("smb://192.168.0.2/Comics/나루토/스캔본/"));
+    assertEquals("나루토", Order.resolveFolderSeries("primary:Download/[완결] 나루토 1~72권/고화질"));
+    assertEquals("원피스", Order.resolveFolderSeries("primary:만화/원피스/1500px/원본"));
   }
 
   @Test
