@@ -1417,23 +1417,170 @@ public final class Main extends Activity {
     }
 
     TileHolder findTileAt(float rawX, float rawY) {
+      listView.getLocationOnScreen(loc);
+      int listLeft = loc[0], listTop = loc[1];
       for (int i = 0; i < listView.getChildCount(); i++) {
         View child = listView.getChildAt(i);
         if (!(child.getTag() instanceof TileHolder[])) continue;
+        int rowLeft = listLeft + child.getLeft();
+        int rowTop = listTop + child.getTop();
         TileHolder[] holders = (TileHolder[]) child.getTag();
         for (int c = 0; c < holders.length; c++) {
           TileHolder h = holders[c];
           if (h.item == null || h.root.getVisibility() != View.VISIBLE) continue;
-          h.root.getLocationOnScreen(loc);
-          if (rawX >= loc[0]
-              && rawX <= loc[0] + h.root.getWidth()
-              && rawY >= loc[1]
-              && rawY <= loc[1] + h.root.getHeight()) {
+          int left = rowLeft + h.root.getLeft();
+          int top = rowTop + h.root.getTop();
+          int right = rowLeft + h.root.getRight();
+          int bottom = rowTop + h.root.getBottom();
+          if (rawX >= left && rawX <= right && rawY >= top && rawY <= bottom) {
             return h;
           }
         }
       }
       return null;
+    }
+
+    /**
+     * 드래그 중 현재 손가락 좌표가 같은 섹션(dragSec)의 어느 슬롯에 해당하는지 계산한다.
+     * - 애니메이션 중인 translationX/Y가 아닌 고정 레이아웃 좌표로 판정해 앞→뒤 이동 시 되튕김(핑퐁)을 막는다.
+     * - 마지막 줄의 빈 칸, 행 좌우 여백, 마지막 줄 아래 여백으로 끌어도 맨 뒤(secSize - 1)로 이동한다.
+     */
+    int findDropIndex(float rawX, float rawY) {
+      if (dragSec < 0 || dragSec >= adapter.sections.size()) return -1;
+      int secSize = adapter.sections.get(dragSec).items.size();
+      if (secSize <= 1) return -1;
+
+      listView.getLocationOnScreen(loc);
+      int listLeft = loc[0], listTop = loc[1];
+
+      boolean sawDragSec = false;
+      int firstSecRowTop = Integer.MAX_VALUE;
+      int firstSecRowIdx = -1;
+      int lastSecRowBottom = Integer.MIN_VALUE;
+      int lastSecRowLastIdx = -1;
+      int prevOtherSecBottom = Integer.MIN_VALUE;
+      int nextOtherSecTop = Integer.MAX_VALUE;
+
+      int nearestRowDist = Integer.MAX_VALUE;
+      View nearestRow = null;
+      int nearestRowLeft = 0;
+
+      for (int i = 0; i < listView.getChildCount(); i++) {
+        View child = listView.getChildAt(i);
+        if (!(child.getTag() instanceof TileHolder[])) continue;
+        TileHolder[] holders = (TileHolder[]) child.getTag();
+        int rowSec = -1;
+        int rowFirstIdx = -1;
+        int rowLastIdx = -1;
+        for (int c = 0; c < holders.length; c++) {
+          if (holders[c].item != null) {
+            if (rowSec < 0) {
+              rowSec = holders[c].secIndex;
+              rowFirstIdx = holders[c].itemIndex;
+            }
+            rowLastIdx = holders[c].itemIndex;
+          }
+        }
+        if (rowSec < 0) continue;
+
+        int rowLeft = listLeft + child.getLeft();
+        int rowTop = listTop + child.getTop();
+        int rowBottom = rowTop + child.getHeight();
+
+        if (rowSec != dragSec) {
+          if (!sawDragSec) {
+            if (rowBottom > prevOtherSecBottom) prevOtherSecBottom = rowBottom;
+          } else if (rowTop < nextOtherSecTop) {
+            nextOtherSecTop = rowTop;
+          }
+          continue;
+        }
+
+        sawDragSec = true;
+        if (rowTop < firstSecRowTop) {
+          firstSecRowTop = rowTop;
+          firstSecRowIdx = rowFirstIdx;
+        }
+        if (rowBottom > lastSecRowBottom) {
+          lastSecRowBottom = rowBottom;
+          lastSecRowLastIdx = rowLastIdx;
+        }
+
+        if (rawY >= rowTop && rawY <= rowBottom) {
+          return resolveColumnDropIndex(holders, rowLeft, rawX, rowFirstIdx, rowLastIdx, secSize);
+        }
+
+        int dist = rawY < rowTop ? Math.round(rowTop - rawY) : Math.round(rawY - rowBottom);
+        if (dist < nearestRowDist) {
+          nearestRowDist = dist;
+          nearestRow = child;
+          nearestRowLeft = rowLeft;
+        }
+      }
+
+      if (!sawDragSec) return -1;
+      // 마지막 줄이 화면에 보이고 손가락이 그 아래(다음 섹션 타일 전까지)로 내려간 경우 → 섹션 맨 뒤
+      if (lastSecRowLastIdx == secSize - 1
+          && rawY > lastSecRowBottom
+          && (nextOtherSecTop == Integer.MAX_VALUE || rawY < nextOtherSecTop)) {
+        return secSize - 1;
+      }
+      // 첫 줄이 화면에 보이고 손가락이 그 위(이전 섹션 타일 아래)로 올라간 경우 → 섹션 맨 앞
+      if (firstSecRowIdx == 0
+          && rawY < firstSecRowTop
+          && (prevOtherSecBottom == Integer.MIN_VALUE || rawY > prevOtherSecBottom)) {
+        return 0;
+      }
+      // 섹션 내부 행 사이 미세 간격에 걸린 경우 가장 가까운 행으로 스냅
+      if (nearestRow != null && rawY >= firstSecRowTop && rawY <= lastSecRowBottom) {
+        TileHolder[] holders = (TileHolder[]) nearestRow.getTag();
+        int rowFirstIdx = -1, rowLastIdx = -1;
+        for (TileHolder h : holders) {
+          if (h.item != null) {
+            if (rowFirstIdx < 0) rowFirstIdx = h.itemIndex;
+            rowLastIdx = h.itemIndex;
+          }
+        }
+        if (rowFirstIdx >= 0) {
+          return resolveColumnDropIndex(
+              holders, nearestRowLeft, rawX, rowFirstIdx, rowLastIdx, secSize);
+        }
+      }
+      return -1;
+    }
+
+    private int resolveColumnDropIndex(
+        TileHolder[] holders,
+        int rowLeft,
+        float rawX,
+        int rowFirstIdx,
+        int rowLastIdx,
+        int secSize) {
+      int bestIdx = -1;
+      float bestDist = Float.MAX_VALUE;
+      int firstSlotLeft = Integer.MAX_VALUE;
+      int lastOccupiedRight = Integer.MIN_VALUE;
+
+      for (int c = 0; c < holders.length; c++) {
+        TileHolder h = holders[c];
+        int left = rowLeft + h.root.getLeft();
+        int right = rowLeft + h.root.getRight();
+        if (left < firstSlotLeft) firstSlotLeft = left;
+        if (h.item != null && right > lastOccupiedRight) lastOccupiedRight = right;
+        int slotIdx = h.item != null ? h.itemIndex : secSize - 1;
+        if (rawX >= left && rawX <= right) {
+          return slotIdx;
+        }
+        float center = (left + right) * 0.5f;
+        float dist = Math.abs(rawX - center);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestIdx = slotIdx;
+        }
+      }
+      if (rawX < firstSlotLeft) return rowFirstIdx;
+      if (rawX > lastOccupiedRight) return rowLastIdx == secSize - 1 ? secSize - 1 : rowLastIdx;
+      return bestIdx;
     }
 
     void startDrag(TileHolder hit) {
@@ -1449,7 +1596,14 @@ public final class Main extends Activity {
       ghostBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
       Canvas canvas = new Canvas(ghostBitmap);
       hit.root.draw(canvas);
-      hit.root.getLocationOnScreen(loc);
+      View rowParent = (View) hit.root.getParent();
+      if (rowParent != null) {
+        rowParent.getLocationOnScreen(loc);
+        loc[0] += hit.root.getLeft();
+        loc[1] += hit.root.getTop();
+      } else {
+        hit.root.getLocationOnScreen(loc);
+      }
       frame.getLocationOnScreen(frameLoc);
       ghostStartX = loc[0] - frameLoc[0];
       ghostStartY = loc[1] - frameLoc[1];
@@ -1466,28 +1620,30 @@ public final class Main extends Activity {
     }
 
     void checkSwap(float rawX, float rawY) {
-      TileHolder target = findTileAt(rawX, rawY);
-      if (target == null || target.item == null) return;
-      // 별점순 표시하기 ON이면 각 별점이 별도 섹션이므로 같은 별점 섹션 안에서만 이동 허용
-      if (target.secIndex != dragSec) return;
-      if (target.itemIndex == dragIdx) return;
+      int targetIdx = findDropIndex(rawX, rawY);
+      if (targetIdx < 0 || targetIdx == dragIdx) return;
 
       // 스왑 전 화면에 보이는 타일 좌표 기록 (부드러운 슬라이드 이동 애니메이션용)
+      listView.getLocationOnScreen(loc);
+      int prevListLeft = loc[0], prevListTop = loc[1];
       Map<Long, float[]> oldPos = new HashMap<>();
       for (int i = 0; i < listView.getChildCount(); i++) {
         View child = listView.getChildAt(i);
         if (!(child.getTag() instanceof TileHolder[])) continue;
+        int rowLeft = prevListLeft + child.getLeft();
+        int rowTop = prevListTop + child.getTop();
         for (TileHolder h : (TileHolder[]) child.getTag()) {
           if (h.item == null || h.root.getVisibility() != View.VISIBLE) continue;
-          h.root.getLocationOnScreen(loc);
-          oldPos.put(h.item.book.id, new float[] {loc[0], loc[1]});
+          float curX = rowLeft + h.root.getLeft() + h.root.getTranslationX();
+          float curY = rowTop + h.root.getTop() + h.root.getTranslationY();
+          oldPos.put(h.item.book.id, new float[] {curX, curY});
         }
       }
 
       StarSection sec = adapter.sections.get(dragSec);
       CoverItem moved = sec.items.remove(dragIdx);
-      sec.items.add(target.itemIndex, moved);
-      dragIdx = target.itemIndex;
+      sec.items.add(targetIdx, moved);
+      dragIdx = targetIdx;
       adapter.rebuildRowsOnly();
       adapter.notifyDataSetChanged();
       listView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
@@ -1498,18 +1654,25 @@ public final class Main extends Activity {
               new ViewTreeObserver.OnPreDrawListener() {
                 public boolean onPreDraw() {
                   listView.getViewTreeObserver().removeOnPreDrawListener(this);
+                  listView.getLocationOnScreen(loc);
+                  int curListLeft = loc[0], curListTop = loc[1];
                   for (int i = 0; i < listView.getChildCount(); i++) {
                     View child = listView.getChildAt(i);
                     if (!(child.getTag() instanceof TileHolder[])) continue;
+                    int rowLeft = curListLeft + child.getLeft();
+                    int rowTop = curListTop + child.getTop();
                     for (TileHolder h : (TileHolder[]) child.getTag()) {
-                      if (h.item == null
-                          || h.item.book.id == dragBookId
-                          || h.root.getVisibility() != View.VISIBLE) continue;
+                      if (h.item == null || h.root.getVisibility() != View.VISIBLE) continue;
+                      h.root.animate().cancel();
+                      h.root.setTranslationX(0f);
+                      h.root.setTranslationY(0f);
+                      if (h.item.book.id == dragBookId) continue;
                       float[] prev = oldPos.get(h.item.book.id);
                       if (prev == null) continue;
-                      h.root.getLocationOnScreen(loc);
-                      float dx = prev[0] - loc[0];
-                      float dy = prev[1] - loc[1];
+                      float layoutX = rowLeft + h.root.getLeft();
+                      float layoutY = rowTop + h.root.getTop();
+                      float dx = prev[0] - layoutX;
+                      float dy = prev[1] - layoutY;
                       if (Math.abs(dx) > 1f || Math.abs(dy) > 1f) {
                         h.root.setTranslationX(dx);
                         h.root.setTranslationY(dy);
@@ -1573,7 +1736,14 @@ public final class Main extends Activity {
         }
       }
       if (dropping != null && dest != null) {
-        dest.root.getLocationOnScreen(loc);
+        View rowParent = (View) dest.root.getParent();
+        if (rowParent != null) {
+          rowParent.getLocationOnScreen(loc);
+          loc[0] += dest.root.getLeft();
+          loc[1] += dest.root.getTop();
+        } else {
+          dest.root.getLocationOnScreen(loc);
+        }
         frame.getLocationOnScreen(frameLoc);
         float tx = loc[0] - frameLoc[0];
         float ty = loc[1] - frameLoc[1];
@@ -1629,7 +1799,12 @@ public final class Main extends Activity {
       for (int i = 0; i < listView.getChildCount(); i++) {
         View child = listView.getChildAt(i);
         if (child.getTag() instanceof TileHolder[]) {
-          for (TileHolder h : (TileHolder[]) child.getTag()) h.stopWiggle();
+          for (TileHolder h : (TileHolder[]) child.getTag()) {
+            h.stopWiggle();
+            h.root.animate().cancel();
+            h.root.setTranslationX(0f);
+            h.root.setTranslationY(0f);
+          }
         }
       }
     }

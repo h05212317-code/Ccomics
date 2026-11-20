@@ -384,6 +384,131 @@ public class ReaderFrameTest {
     assertFalse(host.arrangeMode);
   }
 
+  @Test
+  @Config(qualifiers = "w400dp-h720dp")
+  public void dragArrangeCanMoveToVeryEndViaLastTileEmptySlotAndBottomWithoutPingPong() {
+    host.frame = new android.widget.FrameLayout(host);
+    host.setContentView(host.frame);
+    host.prefs
+        .edit()
+        .clear()
+        .putInt("sortDefaultVersion", 2)
+        .putBoolean("groupByRating", false)
+        .putInt("sort", Main.SORT_CUSTOM)
+        .putBoolean("sortDesc", false)
+        .putInt("thumbWidthDp", 100)
+        .apply();
+    host.db.exec(
+        "UPDATE books SET title='가 1권',series='가',grp='series:가',rating=5,customOrder=1 WHERE id=1");
+    host.db.exec(
+        "INSERT INTO books(id,title,series,grp,rating,customOrder,pages) VALUES(2,'나 1권','나','series:나',5,2,10)");
+    host.db.exec(
+        "INSERT INTO books(id,title,series,grp,rating,customOrder,pages) VALUES(3,'다 1권','다','series:다',5,3,10)");
+    host.db.exec(
+        "INSERT INTO books(id,title,series,grp,rating,customOrder,pages) VALUES(4,'라 1권','라','series:라',5,4,10)");
+    host.db.exec(
+        "INSERT INTO books(id,title,series,grp,rating,customOrder,pages) VALUES(5,'마 1권','마','series:마',5,5,10)");
+    host.books = host.db.books();
+    host.groups.clear();
+    for (Library.Book b : host.books)
+      host.groups.computeIfAbsent(b.grp, k -> new java.util.ArrayList<>()).add(b);
+
+    host.selected = "";
+    host.arrangeMode = true;
+    host.renderLibrary();
+
+    int w = host.dp(400), h = host.dp(720);
+    Runnable relayout =
+        () -> {
+          org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+          host.shelfList.requestLayout();
+          host.frame.measure(
+              android.view.View.MeasureSpec.makeMeasureSpec(w, android.view.View.MeasureSpec.EXACTLY),
+              android.view.View.MeasureSpec.makeMeasureSpec(h, android.view.View.MeasureSpec.EXACTLY));
+          host.frame.layout(0, 0, w, h);
+          org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
+        };
+    relayout.run();
+
+    Main.ShelfDragController dc = host.dragController;
+    assertNotNull(dc);
+    assertEquals(3, host.sectionAdapter.cols);
+    assertEquals(2, host.shelfList.getChildCount());
+
+    android.view.View row0 = host.shelfList.getChildAt(0);
+    android.view.View row1 = host.shelfList.getChildAt(1);
+    Main.TileHolder[] h0 = (Main.TileHolder[]) row0.getTag();
+    Main.TileHolder[] h1 = (Main.TileHolder[]) row1.getTag();
+    int[] listLoc = new int[2];
+    host.shelfList.getLocationOnScreen(listLoc);
+    int r0X = listLoc[0] + row0.getLeft(), r0Y = listLoc[1] + row0.getTop();
+    int r1X = listLoc[0] + row1.getLeft(), r1Y = listLoc[1] + row1.getTop();
+
+    // 1. 맨 뒤 바로 앞('라', index 3)을 맨 뒤('마', index 4) 위로 드래그 → 맨 뒤로 이동하고 애니메이션 중에도 되튕기지 않아야 한다.
+    dc.startDrag(h1[0]);
+    float lastTileCenterX = r1X + (h1[1].root.getLeft() + h1[1].root.getRight()) * 0.5f;
+    float lastTileCenterY = r1Y + (h1[1].root.getTop() + h1[1].root.getBottom()) * 0.5f;
+    dc.checkSwap(lastTileCenterX, lastTileCenterY);
+    relayout.run();
+    assertEquals("마", host.sectionAdapter.sections.get(0).items.get(3).title);
+    assertEquals("라", host.sectionAdapter.sections.get(0).items.get(4).title);
+    assertEquals(4, dc.dragIdx);
+
+    // 밀려난 '마'(h1[0])가 슬라이드 애니메이션 중(translationX로 여전히 4번 자리 위에 보임)이어도 핑퐁으로 되돌아가면 안 된다.
+    h1 = (Main.TileHolder[]) host.shelfList.getChildAt(1).getTag();
+    float tileStep = h1[1].root.getLeft() - h1[0].root.getLeft();
+    h1[0].root.setTranslationX(tileStep);
+    dc.checkSwap(lastTileCenterX, lastTileCenterY);
+    assertEquals(4, dc.dragIdx);
+    assertEquals("라", host.sectionAdapter.sections.get(0).items.get(4).title);
+    h1[0].root.setTranslationX(0f);
+    dc.finishDrag();
+
+    // 2. 맨 앞('가', index 0)을 마지막 줄 빈 칸(3번째 열)으로 드래그 → 맨 뒤(index 4)로 이동
+    relayout.run();
+    row0 = host.shelfList.getChildAt(0);
+    row1 = host.shelfList.getChildAt(1);
+    h0 = (Main.TileHolder[]) row0.getTag();
+    h1 = (Main.TileHolder[]) row1.getTag();
+    host.shelfList.getLocationOnScreen(listLoc);
+    r1X = listLoc[0] + row1.getLeft();
+    r1Y = listLoc[1] + row1.getTop();
+    assertNull(h1[2].item);
+    dc.startDrag(h0[0]);
+    float emptySlotX = r1X + (h1[2].root.getLeft() + h1[2].root.getRight()) * 0.5f;
+    float emptySlotY = r1Y + (h1[2].root.getTop() + h1[2].root.getBottom()) * 0.5f;
+    dc.checkSwap(emptySlotX, emptySlotY);
+    relayout.run();
+    assertEquals(4, dc.dragIdx);
+    assertEquals("가", host.sectionAdapter.sections.get(0).items.get(4).title);
+    dc.finishDrag();
+
+    // 3. 첫 항목('나', index 0)을 마지막 줄 아래 여백으로 드래그 → 맨 뒤(index 4)로 이동
+    relayout.run();
+    row0 = host.shelfList.getChildAt(0);
+    row1 = host.shelfList.getChildAt(1);
+    h0 = (Main.TileHolder[]) row0.getTag();
+    host.shelfList.getLocationOnScreen(listLoc);
+    r1X = listLoc[0] + row1.getLeft();
+    r1Y = listLoc[1] + row1.getTop();
+    dc.startDrag(h0[0]);
+    dc.checkSwap(r1X + w * 0.5f, r1Y + row1.getHeight() + host.dp(30));
+    relayout.run();
+    assertEquals(4, dc.dragIdx);
+    assertEquals("나", host.sectionAdapter.sections.get(0).items.get(4).title);
+
+    // 4. 같은 드래그 중 첫 줄 위 여백으로 올리면 맨 앞(index 0)으로 이동
+    row0 = host.shelfList.getChildAt(0);
+    host.shelfList.getLocationOnScreen(listLoc);
+    r0X = listLoc[0] + row0.getLeft();
+    r0Y = listLoc[1] + row0.getTop();
+    dc.checkSwap(r0X + w * 0.5f, r0Y - host.dp(10));
+    relayout.run();
+    assertEquals(0, dc.dragIdx);
+    assertEquals("나", host.sectionAdapter.sections.get(0).items.get(0).title);
+    dc.finishDrag();
+  }
+
   Bitmap draw() {
     Bitmap result = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888);
     reader.onDraw(new Canvas(result));
