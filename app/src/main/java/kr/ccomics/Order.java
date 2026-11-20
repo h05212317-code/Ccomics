@@ -28,10 +28,10 @@ final class Order {
   }
 
   /**
-   * Bomulseom + MangaLibraryScanner 통합 노이즈 태그 (끝·괄호·해시태그 위치에서 제거).
-   * 작품명에 흔히 쓰일 수 있는 단어(완/end/raw/만화 등)도 끝/괄호/해시태그 위치에서는 안전하게 제거한다.
+   * 괄호/해시태그 안이거나 맨 앞 해시태그에서만 안전하게 제거하는 확장 노이즈 토큰.
+   * (재판/수정/알라딘/End/Down/Raw/만화 등 일반 작품명에도 쓰일 수 있는 단어는 괄호·해시태그 밖에서는 절대 자르지 않는다.)
    */
-  private static final String TAIL_NOISE_TOKEN =
+  private static final String BRACKET_NOISE_TOKEN =
       "(?:원본|공금|스캔\\s*단면|스캔\\s*양면|스캔본|스캔판|스캔|"
           + "정발본|정발판|정발\\s*미완|정발|정식\\s*발매|정식판|정식|정품|미정발|"
           + "(?:AI\\s*)?번역본|(?:AI\\s*)?번역|자체\\s*번역|미번역|역식|식자|한글판?|한국어|"
@@ -49,8 +49,8 @@ final class Order {
           + "다운|down|만화책|만화|comics?|jpg|png|webp|zip|rar|cbz|cbr|pdf|"
           + "\\d{3,5}\\s*px|(?:720|1080|1440|2160)p)";
 
-  /** 작품명 중간에 괄호 없이 등장해도 작품 제목을 훼손하지 않는 명확한 릴리즈·파일 메타 토큰. */
-  private static final String INLINE_SAFE_NOISE_TOKEN =
+  /** 괄호 없이 제목 끝·중간에 등장해도 일반 만화 제목을 훼손하지 않는 명확한 파일/스캔 메타 토큰. */
+  private static final String SAFE_UNBRACKETED_NOISE_TOKEN =
       "(?:원본|공금|스캔\\s*단면|스캔\\s*양면|스캔본|스캔판|스캔|"
           + "정발본|정발판|정발\\s*미완|정발|정식\\s*발매|미정발|"
           + "(?:AI\\s*)?번역본|(?:AI\\s*)?번역|자체\\s*번역|미번역|역식|식자|한글판|한국어|"
@@ -69,24 +69,24 @@ final class Order {
   private static final Pattern TAGS =
       Pattern.compile(
           "(?iu)(?:\\s*(?:\\[\\s*"
-              + TAIL_NOISE_TOKEN
+              + BRACKET_NOISE_TOKEN
               + "\\s*\\]|\\(\\s*"
-              + TAIL_NOISE_TOKEN
+              + BRACKET_NOISE_TOKEN
               + "\\s*\\)|\\{\\s*"
-              + TAIL_NOISE_TOKEN
+              + BRACKET_NOISE_TOKEN
               + "\\s*\\}|【\\s*"
-              + TAIL_NOISE_TOKEN
+              + BRACKET_NOISE_TOKEN
               + "\\s*】)|\\s+"
-              + TAIL_NOISE_TOKEN
+              + SAFE_UNBRACKETED_NOISE_TOKEN
               + ")+$");
 
   private static final Pattern INLINE_BRACKET_NOISE =
       Pattern.compile(
-          "(?iu)\\s*[\\[\\(\\{【]\\s*" + TAIL_NOISE_TOKEN + "\\s*[\\]\\)\\}】]\\s*");
+          "(?iu)\\s*[\\[\\(\\{【]\\s*" + BRACKET_NOISE_TOKEN + "\\s*[\\]\\)\\}】]\\s*");
 
   private static final Pattern INLINE_NOISE =
       Pattern.compile(
-          "(?iu)(?<![가-힣A-Za-z0-9])(?:" + INLINE_SAFE_NOISE_TOKEN + ")(?![가-힣A-Za-z0-9])");
+          "(?iu)(?<![가-힣A-Za-z0-9])(?:" + SAFE_UNBRACKETED_NOISE_TOKEN + ")(?![가-힣A-Za-z0-9])");
 
   /**
    * 밑줄을 공백으로 바꾸기 전에 끝부분 해시태그(#정발, #정발_고화질, #정식발매 등)를 통째로 제거한다.
@@ -106,7 +106,7 @@ final class Order {
 
   /** 맨 앞에 붙은 노이즈 해시태그(#정발 체인소 맨 등). #DRCL 같은 작품명은 보존한다. */
   private static final Pattern LEADING_NOISE_HASHTAG =
-      Pattern.compile("(?iu)^\\s*#(?:" + TAIL_NOISE_TOKEN + ")(?:\\s+|$)");
+      Pattern.compile("(?iu)^\\s*#(?:" + BRACKET_NOISE_TOKEN + ")(?:\\s+|$)");
 
   /** 끝부분 날짜(2024-05-01, 2024.05.01, 20240501, 2024년 5월 1일) 및 업로드/@작가 메타 제거. */
   private static final Pattern TRAILING_DATE =
@@ -135,22 +135,26 @@ final class Order {
       Pattern.compile(
           "(?iu)(?<=[\\s.\\-_])(\\d{1,4}(?:\\.\\d+)?)\\s*(?:완결|완|完)(?=$|[\\s.\\[\\(\\{【#\\-])");
 
-  /** 1~74권, 01-74, 1권~74권, 1~120화, Vol.1-10, 전 74권 같은 범위·전권 표기. */
+  /**
+   * 1~74권, 01-74, 1권~74권, 1~120화, Vol.1-10, 전 74권 같은 범위·전권 표기.
+   * 주의: vol/ch/ep/제/第/전 앞에는 반드시 단어 경계(?<![가-힣A-Za-z0-9])를 두어
+   * '주술회전 25권', '황제 1권', 'Bleach 1-74'처럼 제목 끝 글자를 잘라먹지 않게 한다.
+   */
   static final Pattern RANGE =
       Pattern.compile(
-          "(?iu)(?:[\\s._\\-]*(?:(?:vol(?:ume)?|ch(?:apter)?|ep(?:isode)?)\\.?\\s*|(?:제|第)\\s*)?(\\d{1,4})\\s*(권|화|편|회(?!차)|巻|vol\\.?)?\\s*[~\\-–—〜]\\s*(\\d{1,4})\\s*(권|화|편|회(?!차)|巻)?|[\\s._\\-]*전\\s*(\\d{1,4})\\s*권)$");
+          "(?iu)(?:[\\s._\\-]*(?:(?<![가-힣A-Za-z0-9])(?:(?:vol(?:ume)?|ch(?:apter)?|ep(?:isode)?)\\.?\\s*|(?:제|第)\\s*))?(?<!\\d)(\\d{1,4})\\s*(권|화|편|회(?!차)|巻|vol\\.?)?\\s*[~\\-–—〜]\\s*(\\d{1,4})\\s*(권|화|편|회(?!차)|巻)?|[\\s._\\-]*(?<![가-힣A-Za-z0-9])전\\s*(\\d{1,4})\\s*권)$");
 
   /** 범위 표기 뒤에 부제·태그·스캔팀명 등 임의 문구가 이어져도 인식하는 임베디드 범위 패턴. */
   private static final Pattern EMBEDDED_RANGE =
       Pattern.compile(
-          "(?iu)^(.*?)(?:[\\s._\\-]*(?:(?:(?:vol(?:ume)?|ch(?:apter)?|ep(?:isode)?)\\.?\\s*|(?:제|第)\\s*)?(\\d{1,4})\\s*(권|화|편|회(?!차)|巻)?\\s*[~\\-–—〜]\\s*(\\d{1,4})\\s*(권|화|편|회(?!차)|巻)|[\\s._\\-]*(?:vol(?:ume)?|ch(?:apter)?|ep(?:isode)?)\\.?\\s*(\\d{1,4})\\s*[~\\-–—〜]\\s*(\\d{1,4})|[\\s._\\-]*전\\s*(\\d{1,4})\\s*권))(?![가-힣A-Za-z0-9])(.*)$");
+          "(?iu)^(.*?)(?:[\\s._\\-]*(?:(?:(?<![가-힣A-Za-z0-9])(?:(?:vol(?:ume)?|ch(?:apter)?|ep(?:isode)?)\\.?\\s*|(?:제|第)\\s*))?(?<!\\d)(\\d{1,4})\\s*(권|화|편|회(?!차)|巻)?\\s*[~\\-–—〜]\\s*(\\d{1,4})\\s*(권|화|편|회(?!차)|巻)|[\\s._\\-]*(?<![가-힣A-Za-z0-9])(?:vol(?:ume)?|ch(?:apter)?|ep(?:isode)?)\\.?\\s*(\\d{1,4})\\s*[~\\-–—〜]\\s*(\\d{1,4})|[\\s._\\-]*(?<![가-힣A-Za-z0-9])전\\s*(\\d{1,4})\\s*권))(?![가-힣A-Za-z0-9])(.*)$");
 
   /** 권·화·편·Vol·Ch·Ep·No·#·괄호·단독 숫자 추출 패턴 (MLS + Bomulseom 통합). */
   private static final Pattern NUMBER =
       Pattern.compile(
           "(?iu)(?:"
-              + "[\\s.\\-_]*(?:#\\s*)?(?:제|第)\\s*(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|회(?!차)|巻)"
-              + "|[\\s.\\-_]*(?:#\\s*)?(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|회(?!차)|巻)"
+              + "[\\s.\\-_]*(?<![가-힣A-Za-z0-9])(?:#\\s*)?(?:제|第)\\s*(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|회(?!차)|巻)"
+              + "|[\\s.\\-_]*(?<!\\d)(?:#\\s*)?(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|회(?!차)|巻)"
               + "|[\\s.\\-_]+(?:#\\s*)?(?:vol(?:ume)?|no|v)\\.?\\s*(\\d{1,4}(?:\\.\\d+)?)"
               + "|^(?:#\\s*)?(?:vol(?:ume)?|no|v)\\.?\\s*(\\d{1,4}(?:\\.\\d+)?)"
               + "|[\\s.\\-_]+(?:#\\s*)?(?:ch(?:apter)?|ep(?:isode)?)\\.?\\s*(\\d{1,4}(?:\\.\\d+)?)"
@@ -168,7 +172,8 @@ final class Order {
   private static final Pattern EMBEDDED_EXPLICIT =
       Pattern.compile(
           "(?iu)^(.*?)(?:"
-              + "[\\s.\\-_]*(?<!\\d)(?:#\\s*)?(?:(?:제|第)\\s*)?(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|회(?!차)|巻)(?![가-힣A-Za-z0-9])"
+              + "[\\s.\\-_]*(?<![가-힣A-Za-z0-9])(?:#\\s*)?(?:제|第)\\s*(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|회(?!차)|巻)(?![가-힣A-Za-z0-9])"
+              + "|[\\s.\\-_]*(?<!\\d)(?:#\\s*)?(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|회(?!차)|巻)(?![가-힣A-Za-z0-9])"
               + "|(?:^|[\\s.\\-_]+)(?:#\\s*)?(?:vol(?:ume)?|no)\\.?\\s*(\\d{1,4}(?:\\.\\d+)?)(?![가-힣A-Za-z0-9.])"
               + "|(?:^|[\\s.\\-_]+)(?:#\\s*)?(?:ch(?:apter)?|ep(?:isode)?)\\.?\\s*(\\d{1,4}(?:\\.\\d+)?)(?![가-힣A-Za-z0-9.])"
               + "|\\s*[\\[\\(【]\\s*(?:제|第)?\\s*(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|巻)\\s*[\\]\\)】]"
@@ -603,18 +608,21 @@ final class Order {
           unit = normalizeUnit(em.group(3));
         } else if (em.group(4) != null) {
           rawNum = em.group(4);
-        } else if (em.group(5) != null) {
-          rawNum = em.group(5);
-          unit = "화";
+          unit = normalizeUnit(em.group(5));
         } else if (em.group(6) != null) {
           rawNum = em.group(6);
-          unit = normalizeUnit(em.group(7));
+        } else if (em.group(7) != null) {
+          rawNum = em.group(7);
+          unit = "화";
+        } else if (em.group(8) != null) {
+          rawNum = em.group(8);
+          unit = normalizeUnit(em.group(9));
         }
         if (rawNum != null) {
           String normNum = normalizeNumberText(rawNum);
           int intNum = parseIntPart(normNum);
           double dblNum = parseDoubleSafe(normNum, intNum);
-          String tail = em.group(8);
+          String tail = em.group(10);
           if (distinctTag.isEmpty()) distinctTag = extractDistinctFromTail(tail);
           String seriesClean = left.isEmpty() ? "" : cleanSeriesTitle(left);
           return new Volume(seriesClean, intNum, normNum, dblNum, unit, "", "", distinctTag);

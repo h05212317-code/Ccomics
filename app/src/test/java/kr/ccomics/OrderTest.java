@@ -317,6 +317,99 @@ public class OrderTest {
   }
 
   @Test
+  public void normalTitlesEndingInJeonJeChEpOrCommonWordsAreNeverTruncated() {
+    // 1. '전'으로 끝나는 정상 제목 (주술회전 25권 -> '전 25권'으로 오인해 '주술회'로 잘리면 안 됨)
+    String[][] jeonTitles = {
+      {"주술회전", "주술회전 25권.zip", "25"},
+      {"주술회전", "주술회전 0권.zip", "0"},
+      {"주술회전", "주술회전 25권 #정발.zip", "25"},
+      {"주술회전", "주술회전 25권 - 부제.zip", "25"},
+      {"주술회전", "[완결] 주술회전 1~30권.zip", ""},
+      {"요자쿠라 일가 대작전", "요자쿠라 일가 대작전 10권.zip", "10"},
+      {"열혈강호 외전", "열혈강호 외전 1권.zip", "1"},
+      {"진삼국무쌍전", "진삼국무쌍전 3권.zip", "3"},
+      {"봉신연의전", "봉신연의전 5권.zip", "5"},
+      {"사신전", "사신전 2권 #정발.zip", "2"},
+      {"용비불패 외전", "용비불패 외전 12권.zip", "12"},
+      // 2. '제'로 끝나는 정상 제목 (황제 1권 -> '제 1권'으로 오인해 '황'으로 잘리면 안 됨)
+      {"황제", "황제 1권.zip", "1"},
+      {"흑의 황제", "흑의 황제 5권 #정발.zip", "5"},
+      {"마제", "마제 10권.zip", "10"},
+      {"마제", "마제 10권 - 부제.zip", "10"},
+      {"형제", "형제 2권.zip", "2"},
+      {"사제", "사제 3권.zip", "3"},
+      {"축제", "축제 4권.zip", "4"},
+      {"마왕의 숙제", "마왕의 숙제 3권.zip", "3"},
+      // 3. 영문 ch / ep / vol로 끝나는 정상 제목
+      {"Bleach", "Bleach 1-74.zip", ""},
+      {"Bleach", "Bleach 1~74권.zip", ""},
+      {"Bleach", "Bleach 25권.zip", "25"},
+      {"Witch", "Witch 1-10권.zip", ""},
+      {"Deep", "Deep 1-5권.zip", ""},
+      {"Step", "Step 1-3권.zip", ""},
+      {"Revol", "Revol 1-2권.zip", ""},
+      // 4. 일반 단어(재판/수정/알라딘/End/Down/컬러/만화 등)로 끝나는 정상 제목
+      {"역전 재판", "역전 재판 1권.zip", "1"},
+      {"역전 재판", "역전 재판.zip", ""},
+      {"Platinum End", "Platinum End 14권.zip", "14"},
+      {"Platinum End", "Platinum End.zip", ""},
+      {"Platinum End", "Platinum End 14권 (완).zip", "14"},
+      {"Touch Down", "Touch Down 3권.zip", "3"},
+      {"Touch Down", "Touch Down.zip", ""},
+      {"푸른 수정", "푸른 수정 2권.zip", "2"},
+      {"마기 알라딘", "마기 알라딘 1권.zip", "1"},
+      {"트루 컬러", "트루 컬러 5권.zip", "5"},
+      {"이상한 만화", "이상한 만화 1권.zip", "1"},
+      {"Digital Devil", "Digital Devil 1권.zip", "1"},
+      // 5. 주요 인기 만화 제목 일괄 검증
+      {"나의 히어로 아카데미아", "나의 히어로 아카데미아 34권.zip", "34"},
+      {"약속의 네버랜드", "약속의 네버랜드 20권.zip", "20"},
+      {"여친, 빌리겠습니다", "여친, 빌리겠습니다 45권.zip", "45"},
+      {"유큐홀더!", "유큐홀더! 28권.zip", "28"},
+      {"포켓몬스터 스페셜", "포켓몬스터 스페셜 57권.zip", "57"},
+      {"학생회에도 구멍은 있다!", "학생회에도 구멍은 있다! 12권.zip", "12"},
+      {"괴수 8호", "괴수 8호 12권.zip", "12"},
+      {"3월의 라이온", "3월의 라이온 17권.zip", "17"},
+      {"20세기 소년", "20세기 소년 22권.zip", "22"},
+      {"5등분의 신부", "5등분의 신부 14권.zip", "14"},
+      {"7개의 대죄", "7개의 대죄 41권.zip", "41"},
+      {"100명의 여자친구", "100명의 여자친구 18권.zip", "18"},
+      {"죠죠의 기묘한 모험 7부", "죠죠의 기묘한 모험 7부 24권.zip", "24"},
+      {"전생했더니 슬라임이었던 건에 대하여", "전생했더니 슬라임이었던 건에 대하여 27권.zip", "27"},
+      {"장송의 프리렌", "장송의 프리렌 13권.zip", "13"},
+      {"최애의 아이", "최애의 아이 16권.zip", "16"},
+      {"단다단", "단다단 17권.zip", "17"},
+      {"사카모토 데이즈", "사카모토 데이즈 19권.zip", "19"},
+      {"블루 록", "블루 록 31권.zip", "31"},
+      {"약사의 혼잣말", "약사의 혼잣말 14권.zip", "14"},
+      {"던전밥", "던전밥 14권.zip", "14"},
+      {"귀멸의 칼날", "귀멸의 칼날 23권.zip", "23"},
+      {"봇치 더 록!", "봇치 더 록! 7권.zip", "7"}
+    };
+    for (String[] tc : jeonTitles) {
+      String expectedSeries = tc[0];
+      String file = tc[1];
+      String expectedNum = tc[2];
+      Order.Volume v = Order.volume(file);
+      assertEquals(file, expectedSeries, Order.series(file));
+      assertEquals(file, expectedNum, v.numberText);
+      if (!expectedNum.isEmpty()) {
+        assertEquals(
+            file,
+            expectedSeries + " " + expectedNum + "권",
+            Order.volumeDisplayTitle(expectedSeries, Order.stem(file), "", true));
+      }
+    }
+    // 반면 단어 경계가 있는 진짜 '전 N권'은 여전히 범위로 인식되어야 한다.
+    assertEquals("블리치", Order.series("블리치 전74권.zip"));
+    assertEquals("전74권", Order.volume("블리치 전74권.zip").rangeLabel);
+    assertEquals("주술회전", Order.series("주술회전 전30권.zip"));
+    assertEquals("전30권", Order.volume("주술회전 전30권.zip").rangeLabel);
+    assertEquals("주술회전", Order.series("주술회전 전 30권 #정발.zip"));
+    assertEquals("전30권", Order.volume("주술회전 전 30권 #정발.zip").rangeLabel);
+  }
+
+  @Test
   public void everyPageOccursOnce() {
     for (int count = 1; count < 45; count++)
       for (boolean split : new boolean[] {false, true})

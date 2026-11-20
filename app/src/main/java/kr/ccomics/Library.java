@@ -343,7 +343,7 @@ final class Library extends SQLiteOpenHelper {
   /** 인식 규칙이 바뀐 뒤 한 번, 이미 열리던 책 중 권 ZIP 묶음인 것을 찾아 권별로 나눈다. */
   static final int RULES = 5;
   /** 로컬 DB 제목·시리즈 재정리 버전(저장소 재접속 없이 백그라운드 1회 실행). */
-  static final int RENORM_VERSION = 7;
+  static final int RENORM_VERSION = 8;
 
   final java.util.concurrent.ConcurrentHashMap<Long, Integer> coverVersions =
       new java.util.concurrent.ConcurrentHashMap<>();
