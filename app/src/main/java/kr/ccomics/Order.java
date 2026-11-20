@@ -27,39 +27,97 @@ final class Order {
     return match.matches() ? match.group(1).trim() : title;
   }
 
-  /** Bomulseom + MangaLibraryScanner 공통 노이즈 태그 (단독 토큰/괄호로 등장할 때 제거). */
-  private static final String NOISE_TOKEN =
-      "(?:원본|공금|스캔\\s*단면|스캔\\s*양면|스캔본|스캔판|스캔|정발본|정발|정식발매|"
-          + "(?:AI\\s*)?번역본|(?:AI\\s*)?번역|자체번역|역식|식자|한글|한국어|"
-          + "무삭제|무수정|화질보정|업스케일|고화질판|저화질판|고화질|저화질|고해상도|저해상도|"
-          + "워터마크\\s*없음|워터마크|no\\s*watermark|전자책|e-?book|e북|단행본|연재본|연재중|연재|"
-          + "미완결|완결|미완|완|完|단권|무료|확인불가|합본|통합본|전권|"
-          + "개정판|완전판|신장판|애장판|소장판|일반판|특별판|한정판|특장판|복구판|"
-          + "19금|15금|19\\+|15\\+|"
+  /**
+   * Bomulseom + MangaLibraryScanner 통합 노이즈 태그 (끝·괄호·해시태그 위치에서 제거).
+   * 작품명에 흔히 쓰일 수 있는 단어(완/end/raw/만화 등)도 끝/괄호/해시태그 위치에서는 안전하게 제거한다.
+   */
+  private static final String TAIL_NOISE_TOKEN =
+      "(?:원본|공금|스캔\\s*단면|스캔\\s*양면|스캔본|스캔판|스캔|"
+          + "정발본|정발판|정발\\s*미완|정발|정식\\s*발매|정식판|정식|정품|미정발|"
+          + "(?:AI\\s*)?번역본|(?:AI\\s*)?번역|자체\\s*번역|미번역|역식|식자|한글판?|한국어|"
+          + "무삭제|무수정|무검열|노모|유모|패치|검열|"
+          + "화질\\s*보정|업스케일|업스|고화질판|저화질판|고화질|저화질|고해상도|저해상도|"
+          + "워터마크\\s*없음|워터마크|워마|no\\s*watermark|교체\\s*필|ungas|"
+          + "전자책|e-?book|e북|단행본|연재본|연재중|연재|"
+          + "미완결|완결|미완|완|完|휴재|중단|완료|진행중|단권|무료|확인불가|합본|통합본|전권|"
+          + "개정판|완전판아님|완전판|신장판|애장판|소장판|일반판|특별한정판|특별판|한정판|특장판|복구판|"
+          + "초판|재판|구판|신판|수정|개정|불법|"
+          + "컬러판|풀컬러|컬러|흑백판|흑백|"
+          + "리디북스|리디|ridibooks|ridi|알라딘|예스24|yes24|교보문고|교보|카카오페이지|카카오|네이버시리즈|봄툰|레진|미스터블루|원스토어|북큐브|"
+          + "19금|15금|19\\+|15\\+|19세|15세|"
           + "scans?|raw|digital|hq|mq|lq|fhd|qhd|4k|fixed|edited|upscale|kor|korean|fin|end|v[12]|"
+          + "다운|down|만화책|만화|comics?|jpg|png|webp|zip|rar|cbz|cbr|pdf|"
+          + "\\d{3,5}\\s*px|(?:720|1080|1440|2160)p)";
+
+  /** 작품명 중간에 괄호 없이 등장해도 작품 제목을 훼손하지 않는 명확한 릴리즈·파일 메타 토큰. */
+  private static final String INLINE_SAFE_NOISE_TOKEN =
+      "(?:원본|공금|스캔\\s*단면|스캔\\s*양면|스캔본|스캔판|스캔|"
+          + "정발본|정발판|정발\\s*미완|정발|정식\\s*발매|미정발|"
+          + "(?:AI\\s*)?번역본|(?:AI\\s*)?번역|자체\\s*번역|미번역|역식|식자|한글판|한국어|"
+          + "무삭제|무수정|무검열|"
+          + "화질\\s*보정|업스케일|고화질판|저화질판|고화질|저화질|고해상도|저해상도|"
+          + "워터마크\\s*없음|워터마크|no\\s*watermark|교체\\s*필|ungas|"
+          + "전자책|e-?book|e북|단행본|연재본|연재중|"
+          + "미완결|완결|미완|完|확인불가|합본|통합본|전권|"
+          + "개정판|완전판아님|완전판|신장판|애장판|소장판|일반판|특별한정판|특별판|한정판|특장판|복구판|"
+          + "컬러판|풀컬러|흑백판|"
+          + "리디북스|ridibooks|예스24|yes24|교보문고|카카오페이지|네이버시리즈|"
+          + "19금|15금|19\\+|15\\+|"
+          + "scans?|hq|mq|lq|fhd|qhd|4k|upscale|kor|korean|"
           + "\\d{3,5}\\s*px|(?:720|1080|1440|2160)p)";
 
   private static final Pattern TAGS =
       Pattern.compile(
           "(?iu)(?:\\s*(?:\\[\\s*"
-              + NOISE_TOKEN
+              + TAIL_NOISE_TOKEN
               + "\\s*\\]|\\(\\s*"
-              + NOISE_TOKEN
+              + TAIL_NOISE_TOKEN
               + "\\s*\\)|\\{\\s*"
-              + NOISE_TOKEN
+              + TAIL_NOISE_TOKEN
               + "\\s*\\}|【\\s*"
-              + NOISE_TOKEN
+              + TAIL_NOISE_TOKEN
               + "\\s*】)|\\s+"
-              + NOISE_TOKEN
+              + TAIL_NOISE_TOKEN
               + ")+$");
 
   private static final Pattern INLINE_BRACKET_NOISE =
       Pattern.compile(
-          "(?iu)\\s*[\\[\\(\\{【]\\s*" + NOISE_TOKEN + "\\s*[\\]\\)\\}】]\\s*");
+          "(?iu)\\s*[\\[\\(\\{【]\\s*" + TAIL_NOISE_TOKEN + "\\s*[\\]\\)\\}】]\\s*");
 
   private static final Pattern INLINE_NOISE =
       Pattern.compile(
-          "(?iu)(?<![가-힣A-Za-z0-9])(?:" + NOISE_TOKEN + ")(?![가-힣A-Za-z0-9])");
+          "(?iu)(?<![가-힣A-Za-z0-9])(?:" + INLINE_SAFE_NOISE_TOKEN + ")(?![가-힣A-Za-z0-9])");
+
+  /**
+   * 밑줄을 공백으로 바꾸기 전에 끝부분 해시태그(#정발, #정발_고화질, #정식발매 등)를 통째로 제거한다.
+   * #15 같은 권 번호(#+숫자)와 #DRCL 같은 제목 첫 글자 해시는 보존한다.
+   */
+  private static final Pattern RAW_TRAILING_HASHTAG =
+      Pattern.compile(
+          "(?iu)(?:\\s+|[_.\\-]|(?<=[권화편巻\\]\\)\\}】]))([#＃](?!\\d)[^\\s\\[\\]\\(\\)\\{\\}【】]+)(?=\\s*(?:\\[[^\\[\\]]*\\]|\\([^()]*\\)|\\{[^{}]*\\}|【[^【】]*】)*\\s*$)");
+
+  /** 정규화 이후 끝부분 해시태그 제거 (#정발, # 정발판, #정식, #고화질 등 비숫자 해시태그). */
+  private static final Pattern TRAILING_HASHTAG =
+      Pattern.compile("(?iu)(?:\\s+|[.\\-]|(?<=[권화편巻\\]\\)\\}】]))(#\\s*(?!\\d)[^\\s]+)$");
+
+  /** 작품명 중간·끝에 공백 뒤에 붙은 비숫자 해시태그(#정발 등). 제목 첫머리 #DRCL은 건드리지 않는다. */
+  private static final Pattern INLINE_HASHTAG =
+      Pattern.compile("(?iu)(?<=\\s)#(?!\\d)[^\\s]+");
+
+  /** 맨 앞에 붙은 노이즈 해시태그(#정발 체인소 맨 등). #DRCL 같은 작품명은 보존한다. */
+  private static final Pattern LEADING_NOISE_HASHTAG =
+      Pattern.compile("(?iu)^\\s*#(?:" + TAIL_NOISE_TOKEN + ")(?:\\s+|$)");
+
+  /** 끝부분 날짜(2024-05-01, 2024.05.01, 20240501, 2024년 5월 1일) 및 업로드/@작가 메타 제거. */
+  private static final Pattern TRAILING_DATE =
+      Pattern.compile(
+          "(?iu)(?:\\s+|\\s*[-/]\\s*)(?:(?:19|20)\\d{2}[-./년]\\s*\\d{1,2}[-./월]\\s*\\d{1,2}일?|(?:19|20)\\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\\d|3[01]))$");
+
+  private static final Pattern TRAILING_AT_AUTHOR =
+      Pattern.compile("(?iu)\\s+@[^\\s]+$");
+
+  private static final Pattern TRAILING_UPLOAD =
+      Pattern.compile("(?iu)(?:\\s*/\\s*\\d{4}\\s*\\d{1,2}\\s*\\d{1,2})?\\s*업로드$");
 
   private static final Pattern LEADING_WEBTOON =
       Pattern.compile("(?iu)^\\s*(?:\\[\\s*웹툰\\s*\\]|웹툰\\s+)");
@@ -68,35 +126,73 @@ final class Order {
       Pattern.compile(
           "(?iu)(?:\\s+[가-힣A-Za-z]{2,12}\\s+(?:원작|그림|지음|글|작화|번역))+$");
 
-  /** 1권완, 01권 완결, 10화완 같은 권수 직후 완결 접미사 분리. */
+  /** 1권완, 01권 완결, 10화완, 72완결 같은 권수 직후 완결 접미사 분리. */
   private static final Pattern VOLUME_COMPLETE_GLUED =
       Pattern.compile(
-          "(?iu)(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|회(?!차)|巻)\\s*(?:완결|완|完|fin|end)(?=$|[\\s.\\[\\(\\{【])");
+          "(?iu)(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|회(?!차)|巻)\\s*(?:완결|완|完|fin|end)(?=$|[\\s.\\[\\(\\{【#\\-])");
+
+  private static final Pattern BARE_VOLUME_COMPLETE_GLUED =
+      Pattern.compile(
+          "(?iu)(?<=[\\s.\\-_])(\\d{1,4}(?:\\.\\d+)?)\\s*(?:완결|완|完)(?=$|[\\s.\\[\\(\\{【#\\-])");
 
   /** 1~74권, 01-74, 1권~74권, 1~120화, Vol.1-10, 전 74권 같은 범위·전권 표기. */
   static final Pattern RANGE =
       Pattern.compile(
           "(?iu)(?:[\\s._\\-]*(?:(?:vol(?:ume)?|ch(?:apter)?|ep(?:isode)?)\\.?\\s*|(?:제|第)\\s*)?(\\d{1,4})\\s*(권|화|편|회(?!차)|巻|vol\\.?)?\\s*[~\\-–—〜]\\s*(\\d{1,4})\\s*(권|화|편|회(?!차)|巻)?|[\\s._\\-]*전\\s*(\\d{1,4})\\s*권)$");
 
+  /** 범위 표기 뒤에 부제·태그·스캔팀명 등 임의 문구가 이어져도 인식하는 임베디드 범위 패턴. */
+  private static final Pattern EMBEDDED_RANGE =
+      Pattern.compile(
+          "(?iu)^(.*?)(?:[\\s._\\-]*(?:(?:(?:vol(?:ume)?|ch(?:apter)?|ep(?:isode)?)\\.?\\s*|(?:제|第)\\s*)?(\\d{1,4})\\s*(권|화|편|회(?!차)|巻)?\\s*[~\\-–—〜]\\s*(\\d{1,4})\\s*(권|화|편|회(?!차)|巻)|[\\s._\\-]*(?:vol(?:ume)?|ch(?:apter)?|ep(?:isode)?)\\.?\\s*(\\d{1,4})\\s*[~\\-–—〜]\\s*(\\d{1,4})|[\\s._\\-]*전\\s*(\\d{1,4})\\s*권))(?![가-힣A-Za-z0-9])(.*)$");
+
   /** 권·화·편·Vol·Ch·Ep·No·#·괄호·단독 숫자 추출 패턴 (MLS + Bomulseom 통합). */
   private static final Pattern NUMBER =
       Pattern.compile(
           "(?iu)(?:"
-              + "[\\s.\\-_]*(?:제|第)\\s*(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|회(?!차)|巻)"
-              + "|[\\s.\\-_]*(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|회(?!차)|巻)"
-              + "|[\\s.\\-_]+(?:vol(?:ume)?|no|v)\\.?\\s*(\\d{1,4}(?:\\.\\d+)?)"
-              + "|^(?:vol(?:ume)?|no|v)\\.?\\s*(\\d{1,4}(?:\\.\\d+)?)"
-              + "|[\\s.\\-_]+(?:ch(?:apter)?|ep(?:isode)?)\\.?\\s*(\\d{1,4}(?:\\.\\d+)?)"
-              + "|^(?:ch(?:apter)?|ep(?:isode)?)\\.?\\s*(\\d{1,4}(?:\\.\\d+)?)"
+              + "[\\s.\\-_]*(?:#\\s*)?(?:제|第)\\s*(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|회(?!차)|巻)"
+              + "|[\\s.\\-_]*(?:#\\s*)?(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|회(?!차)|巻)"
+              + "|[\\s.\\-_]+(?:#\\s*)?(?:vol(?:ume)?|no|v)\\.?\\s*(\\d{1,4}(?:\\.\\d+)?)"
+              + "|^(?:#\\s*)?(?:vol(?:ume)?|no|v)\\.?\\s*(\\d{1,4}(?:\\.\\d+)?)"
+              + "|[\\s.\\-_]+(?:#\\s*)?(?:ch(?:apter)?|ep(?:isode)?)\\.?\\s*(\\d{1,4}(?:\\.\\d+)?)"
+              + "|^(?:#\\s*)?(?:ch(?:apter)?|ep(?:isode)?)\\.?\\s*(\\d{1,4}(?:\\.\\d+)?)"
               + "|(?:^|[\\s.\\-_]+)#\\s*(\\d{1,4}(?:\\.\\d+)?)"
-              + "|\\s*[\\[\\(【](?:제|第)?\\s*(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|巻)?[\\]\\)】]"
-              + "|(?:^|[\\s.\\-_~]+)(\\d{1,3})"
+              + "|\\s*[\\[\\(【]\\s*(?:제|第)?\\s*(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|巻)?\\s*[\\]\\)】]"
+              + "|(?:^|[\\s.\\-_~]+)(\\d{1,3}(?:\\.\\d{1,2})?)"
               + ")$");
+
+  /**
+   * MLS REGEX_PARSE_EMBEDDED_EXPLICIT 기반:
+   * '체인소 맨 15권 #정발', '체인소 맨 15권 - 부제', '체인소 맨 15권 정발판'처럼
+   * 명시적 권/화 표기 뒤에 임의의 태그·부제·작가·스토어명이 붙어도 정확히 권수와 작품명을 분리한다.
+   */
+  private static final Pattern EMBEDDED_EXPLICIT =
+      Pattern.compile(
+          "(?iu)^(.*?)(?:"
+              + "[\\s.\\-_]*(?<!\\d)(?:#\\s*)?(?:(?:제|第)\\s*)?(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|회(?!차)|巻)(?![가-힣A-Za-z0-9])"
+              + "|(?:^|[\\s.\\-_]+)(?:#\\s*)?(?:vol(?:ume)?|no)\\.?\\s*(\\d{1,4}(?:\\.\\d+)?)(?![가-힣A-Za-z0-9.])"
+              + "|(?:^|[\\s.\\-_]+)(?:#\\s*)?(?:ch(?:apter)?|ep(?:isode)?)\\.?\\s*(\\d{1,4}(?:\\.\\d+)?)(?![가-힣A-Za-z0-9.])"
+              + "|\\s*[\\[\\(【]\\s*(?:제|第)?\\s*(\\d{1,4}(?:\\.\\d+)?)\\s*(권|화|편|巻)\\s*[\\]\\)】]"
+              + ")(.*)$");
+
+  /** 범위 중간(예: '1~' 뒤의 '14권')을 잘못 자르지 않기 위한 가드 (MLS split_embedded_volume_token 규칙). */
+  private static final Pattern RANGE_PREFIX_GUARD =
+      Pattern.compile("(?iu)(?:\\d\\s*(?:권|화|편|회(?!차)|巻)?|vol\\.?|no\\.?|v\\.?|ch\\.?|act)\\s*[~_\\-–—〜]\\s*$");
+
+  /** MLS split_trailing_number_empty_bracket_author_suffix / split_author_tail_number_suffix 규칙. */
+  private static final Pattern TRAILING_NUMBER_EMPTY_BRACKET_AUTHOR =
+      Pattern.compile("(?iu)^(.+?)[\\s.\\-_#]+(\\d{1,3}(?:\\.\\d{1,2})?)\\s*\\[\\]\\s*(.+?)$");
+
+  private static final Pattern AUTHOR_TAIL_NUMBER =
+      Pattern.compile("(?iu)^(.+?)[\\s.\\-_#]+(\\d{1,3}(?:\\.\\d{1,2})?)\\s*[-–—:]\\s*([A-Za-z][A-Za-z0-9\\s.'&,_-]{2,})$");
 
   /** 상·중·하 권 표기 (MLS 패턴). */
   private static final Pattern PART_VOLUME =
       Pattern.compile(
           "(?iu)(?:^|[\\s.\\-_]+)(?:[\\[\\(【]\\s*)?([상중하上中下])(?:\\s*[권편巻])?(?:\\s*[\\]\\)】])?$");
+
+  private static final Pattern EMBEDDED_PART_VOLUME =
+      Pattern.compile(
+          "(?iu)^(.+?)(?<![가-힣A-Za-z0-9])([상중하上中下])\\s*([권편巻])(?![가-힣A-Za-z0-9])(.*)$");
 
   /** 내용과 상관없이 괄호 한 덩어리: [..] (..) {..} 【..】 */
   private static final String BRACKET =
@@ -116,7 +212,7 @@ final class Order {
       Pattern.compile(
           "(?iu).*(?:외전|번외|특별|부록|스핀오프|단편|설정집|가이드|팬북|화집|일러스트|앤솔로지|extra|special|side|bonus|ova|oad|another).*");
   private static final Pattern KEY_SEPARATORS =
-      Pattern.compile("[\\s_:;\\-~〜()\\[\\]{}【】.,!?'\"+·♡♥❤☆★\\ufe0f]+");
+      Pattern.compile("[\\s_:;\\-–—~〜()\\[\\]{}【】「」『』《》〈〉.,!?'\"+·・…/♡♥❤☆★\\ufe0f]+");
   private static final Pattern GENERIC_KEY =
       Pattern.compile(
           "(?iu)(?:외전|번외|프롤로그|에필로그|후기|부록|단편|특별편|표지|cover|extra|special|bonus|\\d+)");
@@ -142,16 +238,22 @@ final class Order {
               "스캔본", "스캔판", "스캔단면", "스캔양면", "스캔", "원본", "raw", "digital",
               "고화질", "저화질", "고화질판", "저화질판", "고해상도", "저해상도", "화질보정",
               "업스케일", "upscale", "워터마크", "워터마크없음", "구판", "신판", "셀렉션",
-              "selection", "collection", "정발", "정발본", "번역", "번역본", "역식", "수정",
-              "개정", "개정판", "재판", "무삭제", "무수정", "공금", "전자책", "ebook", "e북",
-              "ai번역", "bundle", "single", "primary", "storage", "emulated", "0"));
+              "selection", "collection", "정발", "정발본", "정발판", "정식", "정식판", "정식발매",
+              "번역", "번역본", "역식", "수정", "개정", "개정판", "재판", "무삭제", "무수정",
+              "공금", "전자책", "ebook", "e북", "ai번역", "bundle", "single", "primary",
+              "storage", "emulated", "0"));
 
   private static final Pattern FOLDER_INDEX_OR_RES =
       Pattern.compile(
-          "(?iu)^(?:\\d{3,4}\\s*p(?:x)?|4k|qhd|fhd|hq|mq|lq|[ㄱ-ㅎ가-힣a-z]\\s*[-~]\\s*[ㄱ-ㅎ가-힣a-z]|\\d+\\s*[-~]\\s*\\d+|part\\s*\\d+|season\\s*\\d+)$");
+          "(?iu)^(?:\\d{3,4}\\s*p(?:x)?|4k|qhd|fhd|hq|mq|lq|"
+              + "[ㄱ-ㅎ가-힣a-z]\\s*[-~]\\s*[ㄱ-ㅎ가-힣a-z]|"
+              + "\\d+\\s*[-~]\\s*\\d+\\s*[권화편巻]?|"
+              + "\\d+(?:\\.\\d+)?\\s*(?:권|화|편|회|巻|완결|완|fin|end)?|"
+              + "(?:vol\\.?|v\\.?|ch\\.?|ep\\.?|part|season|제|第)\\s*\\d+\\s*[권화편巻]?)$");
 
   private static final int CACHE_LIMIT = 4096;
   private static final ConcurrentHashMap<String, String> CLEAN_CACHE = new ConcurrentHashMap<>();
+  private static final ConcurrentHashMap<String, String> COMIC_SERIES_CACHE = new ConcurrentHashMap<>();
   private static final ConcurrentHashMap<String, Volume> VOLUME_CACHE = new ConcurrentHashMap<>();
 
   static class Volume {
@@ -317,19 +419,84 @@ final class Order {
     return parsed;
   }
 
+  private static String stripRawTrailingHashtags(String s, String[] distinctHolder) {
+    if (s == null || (s.indexOf('#') < 0 && s.indexOf('＃') < 0)) return s == null ? "" : s;
+    String cur = s, before;
+    do {
+      before = cur;
+      Matcher m = RAW_TRAILING_HASHTAG.matcher(cur);
+      if (m.find() && m.start() > 0) {
+        if (distinctHolder != null && distinctHolder[0].isEmpty()) {
+          String tag = m.group(1);
+          if (tag != null && tag.length() > 1) {
+            String word = tag.substring(1).replace('_', ' ').trim();
+            if (!word.isEmpty() && word.length() <= 20 && DISTINCT.matcher(word).matches()) {
+              distinctHolder[0] = "[" + word + "]";
+            }
+          }
+        }
+        cur = (cur.substring(0, m.start()) + cur.substring(m.end())).trim();
+      }
+    } while (!cur.equals(before));
+    return cur;
+  }
+
+  private static String extractDistinctFromTail(String tail) {
+    if (tail == null || tail.isEmpty()) return "";
+    String t = tail.trim();
+    if (t.isEmpty()) return "";
+    t = stripRawTrailingHashtags(t, null);
+    t = trimEdgePunctuation(t);
+    t = t.replaceAll("^[\\[\\(\\{【]+|[\\]\\)\\}】]+$", "").trim();
+    if (t.isEmpty() || t.length() > 20) return "";
+    return DISTINCT.matcher(t).matches() ? "[" + t + "]" : "";
+  }
+
   private static Volume parseVolume(String filename) {
-    String name = fastNormalizeSpaces(stem(filename));
+    String rawStem = stem(filename);
+    if (rawStem.isEmpty()) return new Volume("", -1);
+    String[] distinctHolder = {""};
+    rawStem = stripRawTrailingHashtags(rawStem, distinctHolder);
+    String name = fastNormalizeSpaces(rawStem);
     if (name.isEmpty()) return new Volume("", -1);
     String working = VOLUME_COMPLETE_GLUED.matcher(name).replaceAll("$1$2");
-    String distinctTag = "";
+    working = BARE_VOLUME_COMPLETE_GLUED.matcher(working).replaceAll("$1");
+    String distinctTag = distinctHolder[0];
     String clean = working, before;
     String rangeLabel = "";
     boolean range = false;
 
-    // 1. 뒤쪽 노이즈 태그·괄호 및 범위 표기 분리 (외전 같은 구별 괄호는 보존)
+    // 1. 뒤쪽 노이즈 태그·해시태그·날짜·괄호 및 범위 표기 분리 (외전 같은 구별 괄호는 보존)
     do {
       before = clean;
       clean = TAGS.matcher(clean).replaceFirst("").trim();
+      if (clean.indexOf('#') > 0) {
+        Matcher hm = TRAILING_HASHTAG.matcher(clean);
+        if (hm.find() && hm.start() > 0) {
+          if (distinctTag.isEmpty()) distinctTag = extractDistinctFromTail(hm.group(1).substring(1));
+          clean = clean.substring(0, hm.start()).trim();
+          continue;
+        }
+      }
+      if (clean.indexOf('@') > 0) {
+        Matcher am = TRAILING_AT_AUTHOR.matcher(clean);
+        if (am.find() && am.start() > 0) {
+          clean = clean.substring(0, am.start()).trim();
+          continue;
+        }
+      }
+      if (clean.endsWith("업로드")) {
+        Matcher um = TRAILING_UPLOAD.matcher(clean);
+        if (um.find() && um.start() > 0) {
+          clean = clean.substring(0, um.start()).trim();
+          continue;
+        }
+      }
+      Matcher dm = TRAILING_DATE.matcher(clean);
+      if (dm.find() && dm.start() > 0) {
+        clean = clean.substring(0, dm.start()).trim();
+        continue;
+      }
       if (hasBracket(clean)) {
         Matcher tm = TRAILING_TAG.matcher(clean);
         if (tm.find() && tm.start() > 0) {
@@ -362,7 +529,7 @@ final class Order {
       }
     } while (!clean.equals(before));
 
-    // 2. 앞쪽 괄호 태그([원본], [완결], [2024] 등) 및 [웹툰] 제거
+    // 2. 앞쪽 괄호 태그([원본], [완결], [2024] 등), #노이즈 및 [웹툰] 제거
     clean = stripLeadingNoise(clean);
 
     // 1~74권 같은 범위 표기는 한 권이 아니라 작품 전체이므로 권 번호 없이 작품명만 쓴다.
@@ -371,7 +538,7 @@ final class Order {
       return new Volume(seriesClean, -1, "", -1, "권", "", rangeLabel, distinctTag);
     }
 
-    // 3. 권/화 번호 추출
+    // 3. 끝부분 권/화 번호 추출
     Matcher m = NUMBER.matcher(clean);
     if (m.find()) {
       String rawNum = null;
@@ -410,12 +577,88 @@ final class Order {
       }
     }
 
-    // 4. 상/중/하 권 표기 추출 (MLS 규칙)
+    // 4. 범위 표기 뒤에 부제·미등록 태그 등이 붙은 경우 (예: '체인소 맨 1~14권 정발스캔')
+    Matcher erm = EMBEDDED_RANGE.matcher(clean);
+    if (erm.find()) {
+      String left = erm.group(1).trim();
+      if (!left.isEmpty()) {
+        String label = formatEmbeddedRange(erm);
+        String tail = erm.group(9);
+        if (distinctTag.isEmpty()) distinctTag = extractDistinctFromTail(tail);
+        return new Volume(cleanSeriesTitle(left), -1, "", -1, "권", "", label, distinctTag);
+      }
+    }
+
+    // 5. MLS split_embedded_volume_token 규칙:
+    // '체인소 맨 15권 #정발판', '체인소 맨 15권 - 부제', '체인소 맨 Vol.15 스캔팀'처럼
+    // 명시적 권/화 표기 뒤에 임의의 문구가 붙어도 정확히 권수와 작품명을 분리한다.
+    Matcher em = EMBEDDED_EXPLICIT.matcher(clean);
+    if (em.find()) {
+      String left = em.group(1).trim();
+      if (!RANGE_PREFIX_GUARD.matcher(left).find()) {
+        String rawNum = null;
+        String unit = "권";
+        if (em.group(2) != null) {
+          rawNum = em.group(2);
+          unit = normalizeUnit(em.group(3));
+        } else if (em.group(4) != null) {
+          rawNum = em.group(4);
+        } else if (em.group(5) != null) {
+          rawNum = em.group(5);
+          unit = "화";
+        } else if (em.group(6) != null) {
+          rawNum = em.group(6);
+          unit = normalizeUnit(em.group(7));
+        }
+        if (rawNum != null) {
+          String normNum = normalizeNumberText(rawNum);
+          int intNum = parseIntPart(normNum);
+          double dblNum = parseDoubleSafe(normNum, intNum);
+          String tail = em.group(8);
+          if (distinctTag.isEmpty()) distinctTag = extractDistinctFromTail(tail);
+          String seriesClean = left.isEmpty() ? "" : cleanSeriesTitle(left);
+          return new Volume(seriesClean, intNum, normNum, dblNum, unit, "", "", distinctTag);
+        }
+      }
+    }
+
+    // 6. MLS split_trailing_number_empty_bracket_author_suffix / split_author_tail_number_suffix
+    Matcher eba = TRAILING_NUMBER_EMPTY_BRACKET_AUTHOR.matcher(clean);
+    if (eba.find()) {
+      String left = eba.group(1).trim();
+      String normNum = normalizeNumberText(eba.group(2));
+      int intNum = parseIntPart(normNum);
+      if (!left.isEmpty() && intNum >= 0) {
+        double dblNum = parseDoubleSafe(normNum, intNum);
+        return new Volume(cleanSeriesTitle(left), intNum, normNum, dblNum, "권", "", "", distinctTag);
+      }
+    }
+    Matcher atn = AUTHOR_TAIL_NUMBER.matcher(clean);
+    if (atn.find()) {
+      String left = atn.group(1).trim();
+      String normNum = normalizeNumberText(atn.group(2));
+      int intNum = parseIntPart(normNum);
+      if (!left.isEmpty() && intNum >= 0) {
+        double dblNum = parseDoubleSafe(normNum, intNum);
+        return new Volume(cleanSeriesTitle(left), intNum, normNum, dblNum, "권", "", "", distinctTag);
+      }
+    }
+
+    // 7. 상/중/하 권 표기 추출 (MLS 규칙 — 끝부분 및 뒤쪽 부제/태그 포함)
     Matcher pm = PART_VOLUME.matcher(clean);
     if (pm.find() && pm.start() > 0) {
       String left = clean.substring(0, pm.start()).trim();
       String part = normalizePart(pm.group(1));
       if (!left.isEmpty() && !part.isEmpty()) {
+        return new Volume(cleanSeriesTitle(left), -1, "", -1, "권", part, "", distinctTag);
+      }
+    }
+    Matcher epm = EMBEDDED_PART_VOLUME.matcher(clean);
+    if (epm.find()) {
+      String left = epm.group(1).trim();
+      String part = normalizePart(epm.group(2));
+      if (!left.isEmpty() && !part.isEmpty()) {
+        if (distinctTag.isEmpty()) distinctTag = extractDistinctFromTail(epm.group(4));
         return new Volume(cleanSeriesTitle(left), -1, "", -1, "권", part, "", distinctTag);
       }
     }
@@ -457,41 +700,92 @@ final class Order {
     return a + "~" + b + unit;
   }
 
+  private static String formatEmbeddedRange(Matcher erm) {
+    if (erm.group(8) != null) return "전" + normalizeNumberText(erm.group(8)) + "권";
+    if (erm.group(6) != null && erm.group(7) != null) {
+      String a = normalizeNumberText(erm.group(6));
+      String b = normalizeNumberText(erm.group(7));
+      if (a.isEmpty() || b.isEmpty()) return "";
+      return a + "~" + b + "권";
+    }
+    String a = normalizeNumberText(erm.group(2));
+    String b = normalizeNumberText(erm.group(4));
+    if (a.isEmpty() || b.isEmpty()) return "";
+    String u = erm.group(5) != null ? erm.group(5) : erm.group(3);
+    String unit = "화".equals(u) ? "화" : "권";
+    return a + "~" + b + unit;
+  }
+
   private static String stripLeadingNoise(String title) {
     if (title.isEmpty()) return title;
-    String s = title;
-    if (s.charAt(0) == '[' || s.charAt(0) == '웹' || Character.isWhitespace(s.charAt(0))) {
-      s = LEADING_WEBTOON.matcher(s).replaceFirst("").trim();
-    }
-    while (!s.isEmpty() && (s.charAt(0) == '[' || s.charAt(0) == '(' || s.charAt(0) == '{' || s.charAt(0) == '【')) {
-      Matcher m = LEADING_BRACKET_ONE.matcher(s);
-      if (!m.find()) break;
-      String block = m.group(1);
-      if (VOLUME_BRACKET.matcher(block).matches()) break;
-      String rest = s.substring(m.end()).trim();
-      if (rest.isEmpty()) break;
-      s = rest;
-    }
+    String s = title, before;
+    do {
+      before = s;
+      if (s.isEmpty()) break;
+      char c0 = s.charAt(0);
+      if (c0 == '[' || c0 == '웹' || Character.isWhitespace(c0)) {
+        String next = LEADING_WEBTOON.matcher(s).replaceFirst("").trim();
+        if (!next.isEmpty()) s = next;
+      }
+      if (!s.isEmpty() && s.charAt(0) == '#') {
+        String next = LEADING_NOISE_HASHTAG.matcher(s).replaceFirst("").trim();
+        if (!next.isEmpty()) s = next;
+      }
+      while (!s.isEmpty() && (s.charAt(0) == '[' || s.charAt(0) == '(' || s.charAt(0) == '{' || s.charAt(0) == '【')) {
+        Matcher m = LEADING_BRACKET_ONE.matcher(s);
+        if (!m.find()) break;
+        String block = m.group(1);
+        if (VOLUME_BRACKET.matcher(block).matches()) break;
+        String rest = s.substring(m.end()).trim();
+        if (rest.isEmpty()) break;
+        s = rest;
+      }
+    } while (!s.equals(before));
     return s;
   }
 
   /**
-   * 작품명 내부/앞뒤에 섞인 노이즈 태그(원본, 공금, 스캔본, 고화질, [완결] 등)를 제거해
+   * 작품명 내부/앞뒤에 섞인 노이즈 태그(원본, 공금, 스캔본, 고화질, [완결], #정발 등)를 제거해
    * 깨끗한 만화 제목을 반환한다. (Bomulseom + MLS 규칙 통합, 사전 컴파일 + 캐시)
    */
   static String cleanSeriesTitle(String raw) {
     if (raw == null || raw.isEmpty()) return "";
     String cached = CLEAN_CACHE.get(raw);
     if (cached != null) return cached;
-    String s = fastNormalizeSpaces(raw);
+    String pre = stripRawTrailingHashtags(raw, null);
+    String s = fastNormalizeSpaces(pre);
     if (s.isEmpty()) return "";
     String before;
     do {
       before = s;
       s = stripLeadingNoise(s);
       s = stripTrailing(TAGS.matcher(s).replaceFirst("").trim(), false);
+      if (s.indexOf('#') > 0) {
+        Matcher hm = TRAILING_HASHTAG.matcher(s);
+        if (hm.find() && hm.start() > 0) {
+          String cut = s.substring(0, hm.start()).trim();
+          if (!cut.isEmpty()) s = cut;
+        }
+        String noHash = collapseSpaces(INLINE_HASHTAG.matcher(s).replaceAll(" "), false);
+        if (!noHash.isEmpty()) s = noHash;
+      }
+      if (s.indexOf('@') > 0) {
+        Matcher am = TRAILING_AT_AUTHOR.matcher(s);
+        if (am.find() && am.start() > 0) s = s.substring(0, am.start()).trim();
+      }
+      if (s.endsWith("업로드")) {
+        Matcher um = TRAILING_UPLOAD.matcher(s);
+        if (um.find() && um.start() > 0) s = s.substring(0, um.start()).trim();
+      }
+      Matcher dm = TRAILING_DATE.matcher(s);
+      if (dm.find() && dm.start() > 0) s = s.substring(0, dm.start()).trim();
       String cutRange = RANGE.matcher(s).replaceFirst("").trim();
       if (!cutRange.isEmpty()) s = cutRange;
+      Matcher erm = EMBEDDED_RANGE.matcher(s);
+      if (erm.find()) {
+        String left = erm.group(1).trim();
+        if (!left.isEmpty()) s = left;
+      }
       String noAuthor = AUTHOR_CREDIT_TAIL.matcher(s).replaceFirst("").trim();
       if (!noAuthor.isEmpty()) s = noAuthor;
       if (hasBracket(s)) {
@@ -506,6 +800,33 @@ final class Order {
     String result = s.isEmpty() ? raw.trim() : s;
     if (CLEAN_CACHE.size() > CACHE_LIMIT) CLEAN_CACHE.clear();
     CLEAN_CACHE.put(raw, result);
+    return result;
+  }
+
+  /**
+   * ComicInfo.xml의 Series나 폴더명처럼 원래 시리즈명이 들어오는 값을 정리한다.
+   * 노이즈·해시태그·범위·명시적 권수(15권, Vol.15 등)는 제거하되,
+   * 'Mob Psycho 100', '하늘 2099' 같은 제목 끝 단독 숫자는 훼손하지 않는다.
+   */
+  static String cleanComicSeries(String raw) {
+    if (raw == null || raw.isEmpty()) return "";
+    String cached = COMIC_SERIES_CACHE.get(raw);
+    if (cached != null) return cached;
+    String s = cleanSeriesTitle(raw);
+    if (!s.isEmpty()) {
+      s = VOLUME_COMPLETE_GLUED.matcher(s).replaceAll("$1$2");
+      Matcher em = EMBEDDED_EXPLICIT.matcher(s);
+      if (em.find()) {
+        String left = em.group(1).trim();
+        if (!left.isEmpty() && !RANGE_PREFIX_GUARD.matcher(left).find()) {
+          String cleaned = cleanSeriesTitle(left);
+          if (!cleaned.isEmpty()) s = cleaned;
+        }
+      }
+    }
+    String result = s.isEmpty() ? raw.trim() : s;
+    if (COMIC_SERIES_CACHE.size() > CACHE_LIMIT) COMIC_SERIES_CACHE.clear();
+    COMIC_SERIES_CACHE.put(raw, result);
     return result;
   }
 
@@ -600,7 +921,7 @@ final class Order {
       String seg = parts[i].trim();
       if (seg.isEmpty() || seg.equals("bundle")) continue;
       checked++;
-      String cleaned = cleanSeriesTitle(seg);
+      String cleaned = cleanComicSeries(seg);
       if (fallback.isEmpty() && !cleaned.isEmpty()) fallback = cleaned;
       if (!isGarbageOrVariantFolder(seg) && !cleaned.isEmpty()) return cleaned;
     }
@@ -610,12 +931,20 @@ final class Order {
   static String shelfTitle(String title, boolean hideTags) {
     if (title == null) return "";
     if (!hideTags) return title;
-    String normalized = fastNormalizeSpaces(title);
+    String pre = stripRawTrailingHashtags(title, null);
+    String normalized = fastNormalizeSpaces(pre);
     String name = withoutLeadingTags(normalized);
     String before;
     do {
       before = name;
       name = stripTrailing(name, true);
+      if (name.indexOf('#') > 0) {
+        Matcher hm = TRAILING_HASHTAG.matcher(name);
+        if (hm.find() && hm.start() > 0) {
+          name = name.substring(0, hm.start()).trim();
+          continue;
+        }
+      }
       Matcher tags = TAGS.matcher(name);
       if (tags.find() && tags.start() > 0) {
         String shortTitle = name.substring(0, tags.start()).trim();
@@ -648,7 +977,7 @@ final class Order {
     for (int i = 0; i < group.size(); i++) {
       String cs = group.get(i).comicSeries;
       if (cs != null && !cs.isEmpty()) {
-        String c = cleanSeriesTitle(cs);
+        String c = cleanComicSeries(cs);
         int sc = readabilityScore(c);
         if (!c.isEmpty() && sc > comicBestScore) {
           comicBest = c;
@@ -665,12 +994,12 @@ final class Order {
     }
     if (rawCounts.size() == 1) {
       String only = rawCounts.keySet().iterator().next();
-      String c = cleanSeriesTitle(only);
+      String c = cleanComicSeries(only);
       return c.isEmpty() ? shelfTitle(only, true) : c;
     }
     Map<String, Integer> counts = new LinkedHashMap<>();
     for (Map.Entry<String, Integer> e : rawCounts.entrySet()) {
-      String c = cleanSeriesTitle(e.getKey());
+      String c = cleanComicSeries(e.getKey());
       if (c.isEmpty()) c = shelfTitle(e.getKey(), true);
       if (!c.isEmpty()) counts.put(c, counts.getOrDefault(c, 0) + e.getValue());
     }

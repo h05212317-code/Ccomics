@@ -221,4 +221,45 @@ public class BundleTest {
       }
     }
   }
+
+  @Test
+  public void renormalizeMergesHashtagSplitVolumesAndPreservesCustomOrder() {
+    Context ctx = RuntimeEnvironment.getApplication();
+    try (Library lib = new Library(ctx)) {
+      List<Long> pending = new ArrayList<>();
+      lib.record(1, "smb://nas/comics/체인소 맨/체인소 맨 1권.zip", "체인소 맨 1권.zip", "smb://nas/comics/체인소 맨", 10, 1, 1, pending);
+      lib.record(1, "smb://nas/comics/체인소 맨/체인소 맨 15권 #정발판.zip", "체인소 맨 15권 #정발판.zip", "smb://nas/comics/체인소 맨", 10, 1, 1, pending);
+      lib.record(1, "smb://nas/comics/체인소 맨/체인소 맨 16권 #정식.zip", "체인소 맨 16권 #정식.zip", "smb://nas/comics/체인소 맨", 10, 1, 1, pending);
+      lib.record(1, "smb://nas/comics/체인소 맨/17권 #정발.zip", "17권 #정발.zip", "smb://nas/comics/체인소 맨", 10, 1, 1, pending);
+
+      // 구버전 DB에서 '#정발판' 등으로 따로 쪼개져 저장된 상태를 재현한다.
+      List<Library.Book> initial = lib.books();
+      assertEquals(4, initial.size());
+      lib.exec("UPDATE books SET customOrder=10 WHERE id=?", initial.get(0).id);
+      lib.exec(
+          "UPDATE books SET grp='series:체인소맨15권#정발판',series='체인소 맨 15권 #정발판',customOrder=35 WHERE id=?",
+          initial.get(1).id);
+      lib.exec(
+          "UPDATE books SET grp='series:체인소맨16권#정식',series='체인소 맨 16권 #정식',comicSeries='체인소 맨 16권 #정식',customOrder=36 WHERE id=?",
+          initial.get(2).id);
+      lib.exec(
+          "UPDATE books SET grp='series:17권#정발',series='17권 #정발',customOrder=37 WHERE id=?",
+          initial.get(3).id);
+
+      assertTrue(lib.renormalizeBooks());
+
+      List<Library.Book> after = lib.books();
+      assertEquals(4, after.size());
+      for (Library.Book b : after) {
+        assertEquals(b.title, "series:체인소맨", b.grp);
+        assertEquals(b.title, "체인소 맨", b.series);
+        assertEquals(b.title, 10, b.customOrder);
+      }
+      Order.sortBooks(after);
+      assertEquals("체인소 맨 1권", Order.volumeDisplayTitle("체인소 맨", after.get(0).title, after.get(0).comicNumber, true));
+      assertEquals("체인소 맨 15권", Order.volumeDisplayTitle("체인소 맨", after.get(1).title, after.get(1).comicNumber, true));
+      assertEquals("체인소 맨 16권", Order.volumeDisplayTitle("체인소 맨", after.get(2).title, after.get(2).comicNumber, true));
+      assertEquals("체인소 맨 17권", Order.volumeDisplayTitle("체인소 맨", after.get(3).title, after.get(3).comicNumber, true));
+    }
+  }
 }

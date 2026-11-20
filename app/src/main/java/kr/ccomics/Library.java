@@ -343,7 +343,7 @@ final class Library extends SQLiteOpenHelper {
   /** 인식 규칙이 바뀐 뒤 한 번, 이미 열리던 책 중 권 ZIP 묶음인 것을 찾아 권별로 나눈다. */
   static final int RULES = 5;
   /** 로컬 DB 제목·시리즈 재정리 버전(저장소 재접속 없이 백그라운드 1회 실행). */
-  static final int RENORM_VERSION = 6;
+  static final int RENORM_VERSION = 7;
 
   final java.util.concurrent.ConcurrentHashMap<Long, Integer> coverVersions =
       new java.util.concurrent.ConcurrentHashMap<>();
@@ -401,7 +401,7 @@ final class Library extends SQLiteOpenHelper {
     String cn = a.comicInfo != null ? a.comicInfo.number : "";
     exec("UPDATE books SET comicSeries=?,comicNumber=? WHERE id=?", cs, cn, b.id);
     if (!cs.isEmpty() && !b.manualGroup) {
-      String cleanSeries = Order.cleanSeriesTitle(cs);
+      String cleanSeries = Order.cleanComicSeries(cs);
       if (cleanSeries.isEmpty()) cleanSeries = cs;
       String key = Order.seriesKey(cleanSeries);
       if (!key.isEmpty() && !Order.genericKey(key)) {
@@ -409,27 +409,51 @@ final class Library extends SQLiteOpenHelper {
         if (!newGroup.equals(b.grp) || !cleanSeries.equals(b.series)) {
           copySeriesOptions(b.grp, newGroup);
           int rating = Math.max(b.rating, groupRating(newGroup));
+          int customOrder = groupCustomOrder(newGroup);
+          if (customOrder == 0) customOrder = b.customOrder;
           exec(
-              "UPDATE books SET grp=?,series=?,rating=? WHERE id=?",
+              "UPDATE books SET grp=?,series=?,rating=?,customOrder=? WHERE id=?",
               newGroup,
               cleanSeries,
               rating,
+              customOrder,
               b.id);
         }
       }
     }
   }
 
+  static String parentFromUrl(String url) {
+    if (url == null || url.isEmpty()) return "";
+    int nested = url.indexOf(Archive.NESTED);
+    if (nested >= 0) {
+      String outer = Order.percentDecode(url.substring(0, nested)).replace('\\', '/');
+      int slash = outer.lastIndexOf('/');
+      String outerName = slash >= 0 ? outer.substring(slash + 1) : outer;
+      String outerSeries = Order.series(outerName);
+      if (!outerSeries.isEmpty()) return bundleParent(outerSeries);
+      return slash > 0 ? outer.substring(0, slash) : "";
+    }
+    String decoded = Order.percentDecode(url).replace('\\', '/');
+    int slash = decoded.lastIndexOf('/');
+    return slash > 0 ? decoded.substring(0, slash) : "";
+  }
+
   /** 업데이트 직후 저장소 연결 없이도 기존 자동 분류 책들의 작품명·그룹을 최신 규칙으로 빠르게 재정리한다. */
   boolean renormalizeBooks() {
     SQLiteDatabase database = getWritableDatabase();
     Map<String, Integer> ratings = new HashMap<>();
+    Map<String, Integer> customOrders = new HashMap<>();
     try (Cursor c =
         database.rawQuery(
-            "SELECT grp, coalesce(max(rating),0) FROM books GROUP BY grp", null)) {
+            "SELECT grp, coalesce(max(rating),0), coalesce(max(customOrder),0) FROM books GROUP BY grp",
+            null)) {
       while (c.moveToNext()) {
         String g = c.getString(0);
-        if (g != null) ratings.put(g, c.getInt(1));
+        if (g != null) {
+          ratings.put(g, c.getInt(1));
+          customOrders.put(g, c.getInt(2));
+        }
       }
     }
     boolean changed = false;
@@ -440,7 +464,7 @@ final class Library extends SQLiteOpenHelper {
         String targetSeries;
         String targetGroup;
         if (!b.comicSeries.isEmpty()) {
-          targetSeries = Order.cleanSeriesTitle(b.comicSeries);
+          targetSeries = Order.cleanComicSeries(b.comicSeries);
           if (targetSeries.isEmpty()) targetSeries = b.comicSeries;
           String key = Order.seriesKey(targetSeries);
           targetGroup = !key.isEmpty() && !Order.genericKey(key) ? "series:" + key : b.grp;
@@ -453,7 +477,18 @@ final class Library extends SQLiteOpenHelper {
             if (!named) continue;
             targetGroup = "series:" + key;
           } else {
-            String cleaned = Order.cleanSeriesTitle(b.series);
+            Order.Volume sv = Order.volume(b.series + ".zip");
+            String cleaned =
+                !sv.title.isEmpty() && !Order.isGarbageOrVariantFolder(sv.title)
+                    ? Order.cleanComicSeries(sv.title)
+                    : "";
+            if (cleaned.isEmpty()) {
+              String fromUrl = Order.resolveFolderSeries(parentFromUrl(b.url));
+              if (!fromUrl.isEmpty() && !Order.isGarbageOrVariantFolder(fromUrl)) {
+                cleaned = fromUrl;
+              }
+            }
+            if (cleaned.isEmpty()) cleaned = Order.cleanComicSeries(b.series);
             if (cleaned.isEmpty()) continue;
             targetSeries = cleaned;
             String key = Order.seriesKey(cleaned);
@@ -469,11 +504,16 @@ final class Library extends SQLiteOpenHelper {
           copySeriesOptions(b.grp, targetGroup);
           int rating = Math.max(b.rating, ratings.getOrDefault(targetGroup, 0));
           ratings.put(targetGroup, rating);
+          int existingOrder = customOrders.getOrDefault(targetGroup, 0);
+          int order =
+              !targetGroup.equals(b.grp) && existingOrder > 0 ? existingOrder : b.customOrder;
+          if (existingOrder == 0 && order > 0) customOrders.put(targetGroup, order);
           exec(
-              "UPDATE books SET grp=?,series=?,rating=? WHERE id=?",
+              "UPDATE books SET grp=?,series=?,rating=?,customOrder=? WHERE id=?",
               targetGroup,
               targetSeries,
               rating,
+              order,
               b.id);
           changed = true;
         }
@@ -652,7 +692,7 @@ final class Library extends SQLiteOpenHelper {
         if (manual == -1)
           manual = legacyGroup.equals(oldGroup) && legacySeries.equals(c.getString(6)) ? 0 : 1;
         if (manual == 0 && !comicSeries.isEmpty()) {
-          String cs = Order.cleanSeriesTitle(comicSeries);
+          String cs = Order.cleanComicSeries(comicSeries);
           if (!cs.isEmpty()) {
             series = cs;
             String ckey = Order.seriesKey(cs);

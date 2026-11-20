@@ -199,7 +199,121 @@ public class OrderTest {
     assertEquals(key, Order.seriesKey("그비스크돌은사랑을한다"));
     assertNotEquals(key, Order.seriesKey("그 비스크 돌은 사랑을 한다 외전"));
     assertEquals(Order.seriesKey("Re:Zero"), Order.seriesKey("re zero"));
+    assertEquals(Order.seriesKey("86 -에이티식스-"), Order.seriesKey("86 —에이티식스—"));
     assertEquals("1", Order.seriesKey("[1]"));
+  }
+
+  @Test
+  public void hashtagsAndEmbeddedTrailingTextAfterVolumeGroupCleanly() {
+    String key = Order.seriesKey("체인소 맨");
+    String[] chainsawFiles = {
+      "체인소 맨 1권.zip",
+      "체인소 맨 15권 #정발.zip",
+      "체인소 맨 15권 #정발본.cbz",
+      "체인소 맨 15권 #정발판.zip",
+      "체인소 맨 16권 #정식.zip",
+      "체인소 맨 16권 #정식발매.zip",
+      "체인소 맨 17권 #정발_고화질.zip",
+      "체인소 맨 17권 #정발 #고화질.zip",
+      "체인소 맨 18권#정발판.zip",
+      "체인소 맨 18 #정발판.zip",
+      "체인소 맨 19권 #정발 (1500px).cbz",
+      "체인소 맨 19권 - 악마의 심장.zip",
+      "체인소 맨 15권 부제목.zip",
+      "체인소 맨 16권 리디북스.zip",
+      "체인소 맨 17권 2024-05-01.zip",
+      "체인소 맨 18권 20240501.zip",
+      "체인소 맨 19권 @후지모토.zip",
+      "체인소 맨 15권 [] 후지모토 타츠키.zip",
+      "체인소 맨 15 [] Tatsuki Fujimoto.zip",
+      "체인소 맨 15 - Tatsuki Fujimoto.zip",
+      "체인소 맨 #15권.zip",
+      "체인소 맨 #16권 #정발.zip",
+      "체인소 맨 17권완 #정발.zip",
+      "체인소 맨 18완.zip",
+      "체인소 맨 Vol.19 #정발판.zip",
+      "체인소 맨 [15권] #정발판.zip",
+      "체인소 맨 [16권] - 부제.zip",
+      "#정발 체인소 맨 17권.zip",
+      "체인소 맨 #정발 18권.zip",
+      "체인소 맨19권 #정발판.zip",
+      "체인소 맨 15.5권 #정발.zip",
+      "체인소 맨 1~14권 #정발판.zip",
+      "체인소 맨 1~14권 리디스캔.zip",
+      "체인소 맨 전19권 #정발.zip",
+      "체인소 맨 상권 #정발.zip",
+      "체인소 맨 하권 - 부제.zip",
+      "체인소 맨.15권.#정발.zip",
+      "체인소 맨.15.#정발.zip",
+      "체인소 맨.15권 - 부제.zip",
+      "체인소 맨 15권 # 정발판.zip",
+      "체인소 맨 15권 #정발(고화질).zip",
+      "체인소 맨 15권 #정발본#고화질.zip",
+      "체인소 맨 15권 ＃정발.zip"
+    };
+    for (String f : chainsawFiles) {
+      assertEquals(f, key, Order.seriesKey(Order.series(f)));
+      assertEquals(f, "체인소 맨", Order.series(f));
+    }
+
+    assertEquals(15, Order.volume("체인소 맨 15권 #정발판.zip").number);
+    assertEquals(16, Order.volume("체인소 맨 16권 #정식.zip").number);
+    assertEquals(17, Order.volume("체인소 맨 17권 #정발_고화질.zip").number);
+    assertEquals(18, Order.volume("체인소 맨 18권#정발판.zip").number);
+    assertEquals(18, Order.volume("체인소 맨 18 #정발판.zip").number);
+    assertEquals(19, Order.volume("체인소 맨 19권 - 악마의 심장.zip").number);
+    assertEquals(15, Order.volume("체인소 맨 15권 부제목.zip").number);
+    assertEquals(15, Order.volume("체인소 맨 #15권.zip").number);
+    assertEquals(17, Order.volume("체인소 맨 17권완 #정발.zip").number);
+    assertEquals(18, Order.volume("체인소 맨 18완.zip").number);
+    assertEquals("15.5", Order.volume("체인소 맨 15.5권 #정발.zip").numberText);
+    assertEquals("상", Order.volume("체인소 맨 상권 #정발.zip").partLabel);
+    assertEquals("하", Order.volume("체인소 맨 하권 - 부제.zip").partLabel);
+    assertEquals(-1, Order.volume("체인소 맨 1~14권 #정발판.zip").number);
+    assertEquals("1~14권", Order.volume("체인소 맨 1~14권 리디스캔.zip").rangeLabel);
+    assertEquals("전19권", Order.volume("체인소 맨 전19권 #정발.zip").rangeLabel);
+
+    assertEquals(
+        "체인소 맨 15권",
+        Order.volumeDisplayTitle("체인소 맨", "체인소 맨 15권 #정발판", "", true));
+    assertEquals(
+        "체인소 맨 16권",
+        Order.volumeDisplayTitle("체인소 맨", "체인소 맨 16권 - 악마의 심장", "", true));
+    assertEquals(
+        "체인소 맨 15권 [외전]",
+        Order.volumeDisplayTitle("체인소 맨", "체인소 맨 15권 외전", "", true));
+    assertEquals(
+        "체인소 맨 15권 [외전]",
+        Order.volumeDisplayTitle("체인소 맨", "체인소 맨 15권 [외전] #정발", "", true));
+    assertEquals("체인소 맨 15권", Order.shelfTitle("체인소 맨 15권 #정발판", true));
+
+    // 오탐 방지: #으로 시작하는 작품명, 연도, 회차, 부, 일반 단어 포함 제목 보존
+    assertEquals("#DRCL", Order.series("#DRCL 1권.zip"));
+    assertEquals("#DRCL", Order.series("#DRCL 1권 #정발.zip"));
+    assertEquals(1, Order.volume("#DRCL 1권 #정발.zip").number);
+    assertEquals("하늘 2099", Order.series("하늘 2099.zip"));
+    assertEquals("하늘 2099", Order.series("하늘 2099 1권 #정발.zip"));
+    assertEquals(1, Order.volume("하늘 2099 1권 #정발.zip").number);
+    assertEquals("1회차 인생", Order.series("1회차 인생 3권 #정발.zip"));
+    assertEquals(3, Order.volume("1회차 인생 3권 #정발.zip").number);
+    assertEquals("1권부터 시작하는 이세계", Order.series("1권부터 시작하는 이세계.zip"));
+    assertEquals(-1, Order.volume("1권부터 시작하는 이세계.zip").number);
+    assertEquals("죠죠 2부", Order.series("죠죠 2부 01권 #정발.zip"));
+    assertEquals(1, Order.volume("죠죠 2부 01권 #정발.zip").number);
+    assertEquals("수정 공주", Order.series("수정 공주 1권.zip"));
+    assertEquals("Raw Hero", Order.series("Raw Hero 1권.zip"));
+
+    // ComicInfo Series 정리: 명시적 권수·해시태그는 제거하되 끝 단독 숫자는 유지
+    assertEquals("체인소 맨", Order.cleanComicSeries("체인소 맨 15권 #정발판"));
+    assertEquals("체인소 맨", Order.cleanComicSeries("[완결] 체인소 맨 1~19권"));
+    assertEquals("Mob Psycho 100", Order.cleanComicSeries("Mob Psycho 100"));
+    assertEquals("하늘 2099", Order.cleanComicSeries("하늘 2099"));
+
+    // 폴더명 인식: 권수 폴더(15권, 01, Vol.15)를 건너뛰고 상위 작품 폴더를 찾는다.
+    assertEquals("체인소 맨", Order.resolveFolderSeries("smb://192.168.0.2/Comics/체인소 맨/15권/"));
+    assertEquals("체인소 맨", Order.resolveFolderSeries("primary:Comics/체인소 맨 1~19권 #정발/Vol.15"));
+    assertEquals("", Order.volume("15권 #정발.zip").title);
+    assertEquals(15, Order.volume("15권 #정발.zip").number);
   }
 
   @Test
