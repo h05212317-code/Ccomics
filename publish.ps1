@@ -18,8 +18,12 @@ $cert = & "$sdk/build-tools/35.0.0/apksigner.bat" verify --print-certs Ccomics.a
 if ($LASTEXITCODE -or !($cert -match 'certificate SHA-256 digest: 5fcb92b91e22abf858bd39dec5a983d30da062843d6e4330ecded06809891257$')) { throw 'The APK must use the original Ccomics signing key.' }
 git push -u origin HEAD:main
 if ($LASTEXITCODE) { throw 'Git push failed.' }
+$prevPref = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
 $existing = & $gh release view $tag --repo $repo --json isDraft --jq .isDraft 2>$null
-if ($LASTEXITCODE -eq 0 -and $existing -ne 'true') { throw 'This version has already been published. Increase versionCode and versionName.' }
+$existingCode = $LASTEXITCODE
+$ErrorActionPreference = $prevPref
+if ($existingCode -eq 0 -and $existing -ne 'true') { throw 'This version has already been published. Increase versionCode and versionName.' }
 $noteFile = [IO.Path]::GetTempFileName()
 try {
     [IO.File]::WriteAllText($noteFile, $Notes)

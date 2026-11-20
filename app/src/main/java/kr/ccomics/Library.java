@@ -335,8 +335,22 @@ final class Library extends SQLiteOpenHelper {
     notice.changed();
   }
 
-  /** 인식 규칙이 바뀐 뒤 한 번, 이미 열리던 책 중 권 ZIP 묶음과 ComicInfo.xml을 다시 확인한다. */
-  static final int RULES = 6;
+  /** 인식 규칙이 바뀐 뒤 한 번, 이미 열리던 책 중 권 ZIP 묶음인 것을 찾아 권별로 나눈다. */
+  static final int RULES = 5;
+  /** 로컬 DB 제목·시리즈 재정리 버전(저장소 재접속 없이 백그라운드 1회 실행). */
+  static final int RENORM_VERSION = 6;
+
+  final java.util.concurrent.ConcurrentHashMap<Long, Integer> coverVersions =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  int coverVersion(long id) {
+    Integer v = coverVersions.get(id);
+    return v == null ? 0 : v;
+  }
+
+  void bumpCoverVersion(long id) {
+    coverVersions.merge(id, 1, Integer::sum);
+  }
 
   int groupRating(String group) {
     try (Cursor c =
@@ -370,9 +384,19 @@ final class Library extends SQLiteOpenHelper {
     }
   }
 
-  /** 업데이트 직후 저장소 연결 없이도 기존 자동 분류 책들의 작품명·그룹을 최신 규칙으로 재정리한다. */
-  void renormalizeBooks() {
+  /** 업데이트 직후 저장소 연결 없이도 기존 자동 분류 책들의 작품명·그룹을 최신 규칙으로 빠르게 재정리한다. */
+  boolean renormalizeBooks() {
     SQLiteDatabase database = getWritableDatabase();
+    Map<String, Integer> ratings = new HashMap<>();
+    try (Cursor c =
+        database.rawQuery(
+            "SELECT grp, coalesce(max(rating),0) FROM books GROUP BY grp", null)) {
+      while (c.moveToNext()) {
+        String g = c.getString(0);
+        if (g != null) ratings.put(g, c.getInt(1));
+      }
+    }
+    boolean changed = false;
     database.beginTransactionNonExclusive();
     try {
       for (Book b : books()) {
@@ -407,19 +431,22 @@ final class Library extends SQLiteOpenHelper {
         }
         if (!targetGroup.equals(b.grp) || !targetSeries.equals(b.series)) {
           copySeriesOptions(b.grp, targetGroup);
-          int rating = Math.max(b.rating, groupRating(targetGroup));
+          int rating = Math.max(b.rating, ratings.getOrDefault(targetGroup, 0));
+          ratings.put(targetGroup, rating);
           exec(
               "UPDATE books SET grp=?,series=?,rating=? WHERE id=?",
               targetGroup,
               targetSeries,
               rating,
               b.id);
+          changed = true;
         }
       }
       database.setTransactionSuccessful();
     } finally {
       database.endTransaction();
     }
+    return changed;
   }
 
   void recheckBundles(long source, long token, List<Long> pending) {
@@ -668,5 +695,6 @@ final class Library extends SQLiteOpenHelper {
       temp.delete();
       throw new IOException("표지 저장 실패");
     }
+    bumpCoverVersion(id);
   }
 }

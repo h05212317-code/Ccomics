@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.text.Normalizer;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.*;
 
 final class Order {
@@ -11,8 +12,13 @@ final class Order {
       Pattern.compile(
           "(?i)^(.+?)[\\s_\\-\\[.(]*(?:vol\\.?\\s*|제\\s*)?(\\d{1,4})(?:\\s*[권巻]|\\s*vol)?[\\s\\]).]*(?:\\s*\\(완결?\\))?$");
 
+  private static final Pattern EXT = Pattern.compile("(?i)\\.(?:zip|cbz|rar|cbr|7z|pdf)$");
+
   static String stem(String s) {
-    return s == null ? "" : s.replaceFirst("(?i)\\.(zip|cbz|rar|cbr|7z|pdf)$", "");
+    if (s == null || s.isEmpty()) return "";
+    int dot = s.lastIndexOf('.');
+    if (dot < 0 || s.length() - dot > 5) return s;
+    return EXT.matcher(s).replaceFirst("");
   }
 
   static String legacySeries(String filename) {
@@ -46,6 +52,10 @@ final class Order {
               + "\\s*】)|\\s+"
               + NOISE_TOKEN
               + ")+$");
+
+  private static final Pattern INLINE_BRACKET_NOISE =
+      Pattern.compile(
+          "(?iu)\\s*[\\[\\(\\{【]\\s*" + NOISE_TOKEN + "\\s*[\\]\\)\\}】]\\s*");
 
   private static final Pattern INLINE_NOISE =
       Pattern.compile(
@@ -92,6 +102,7 @@ final class Order {
   private static final String BRACKET =
       "(?:\\[[^\\[\\]]*\\]|\\([^()]*\\)|\\{[^{}]*\\}|【[^【】]*】)";
   private static final Pattern LEADING_TAGS = Pattern.compile("^(?:\\s*" + BRACKET + ")+\\s*");
+  private static final Pattern LEADING_BRACKET_ONE = Pattern.compile("^\\s*(" + BRACKET + ")\\s*");
   private static final Pattern TRAILING_TAG = Pattern.compile("\\s*(" + BRACKET + ")\\s*$");
   /** [3권], (03), 【12】처럼 권 번호만 담은 괄호는 떼지 않는다. */
   private static final Pattern VOLUME_BRACKET =
@@ -109,6 +120,15 @@ final class Order {
   private static final Pattern GENERIC_KEY =
       Pattern.compile(
           "(?iu)(?:외전|번외|프롤로그|에필로그|후기|부록|단편|특별편|표지|cover|extra|special|bonus|\\d+)");
+
+  private static final Pattern COVER_EXACT =
+      Pattern.compile("^(?:cover|front|frontcover|표지|表紙)$");
+  private static final Pattern COVER_BACK =
+      Pattern.compile(".*(?:back|rear|뒤표지|뒷표지|裏表紙).*");
+  private static final Pattern COVER_PART =
+      Pattern.compile(".*(?:cover|front|표지|表紙).*");
+  private static final Pattern COVER_DIR =
+      Pattern.compile(".*(?:^|/)(?:covers?|표지)/.*");
 
   /** MLS garbage_exact_match + variant_folder_keywords 기반 무시할 상위 폴더명. */
   private static final Set<String> GARBAGE_FOLDERS =
@@ -129,6 +149,10 @@ final class Order {
   private static final Pattern FOLDER_INDEX_OR_RES =
       Pattern.compile(
           "(?iu)^(?:\\d{3,4}\\s*p(?:x)?|4k|qhd|fhd|hq|mq|lq|[ㄱ-ㅎ가-힣a-z]\\s*[-~]\\s*[ㄱ-ㅎ가-힣a-z]|\\d+\\s*[-~]\\s*\\d+|part\\s*\\d+|season\\s*\\d+)$");
+
+  private static final int CACHE_LIMIT = 4096;
+  private static final ConcurrentHashMap<String, String> CLEAN_CACHE = new ConcurrentHashMap<>();
+  private static final ConcurrentHashMap<String, Volume> VOLUME_CACHE = new ConcurrentHashMap<>();
 
   static class Volume {
     final String title;
@@ -164,19 +188,103 @@ final class Order {
     }
   }
 
-  /** "001" -> "1", "01.50" -> "1.5", "0" -> "0". */
-  static String normalizeNumberText(String raw) {
-    if (raw == null) return "";
-    String s = raw.trim();
-    if (!s.matches("\\d+(?:\\.\\d+)?")) return "";
-    int dot = s.indexOf('.');
-    if (dot < 0) {
-      String whole = s.replaceFirst("^0+(?!$)", "");
-      return whole;
+  /** ASCII·완성형 한글만 있을 때는 느린 Normalizer.normalize(NFKC) 호출을 건너뛴다. */
+  private static String fastNormalizeSpaces(String raw) {
+    if (raw == null || raw.isEmpty()) return "";
+    boolean needsNfkc = false;
+    for (int i = 0; i < raw.length(); i++) {
+      char c = raw.charAt(i);
+      if (c >= 0x0080 && (c < 0xAC00 || c > 0xD7A3) && (c < 0x3131 || c > 0x318E)
+          && c != '【' && c != '】' && c != '〜' && c != '–' && c != '—' && c != '·'
+          && c != '巻' && c != '第' && c != '完' && c != '上' && c != '中' && c != '下') {
+        needsNfkc = true;
+        break;
+      }
     }
-    String whole = s.substring(0, dot).replaceFirst("^0+(?!$)", "");
-    String frac = s.substring(dot + 1).replaceFirst("0+$", "");
-    return frac.isEmpty() ? whole : whole + "." + frac;
+    String s = needsNfkc ? Normalizer.normalize(raw, Normalizer.Form.NFKC) : raw;
+    return collapseSpaces(s, true);
+  }
+
+  private static String collapseSpaces(String s, boolean underscoreToSpace) {
+    int len = s.length();
+    if (len == 0) return "";
+    StringBuilder sb = null;
+    int start = 0;
+    while (start < len && isSpaceOrUnderscore(s.charAt(start), underscoreToSpace)) start++;
+    int end = len;
+    while (end > start && isSpaceOrUnderscore(s.charAt(end - 1), underscoreToSpace)) end--;
+    if (start >= end) return "";
+    boolean prevSpace = false;
+    for (int i = start; i < end; i++) {
+      char c = s.charAt(i);
+      boolean sp = isSpaceOrUnderscore(c, underscoreToSpace);
+      if (sp) {
+        if (prevSpace || c != ' ') {
+          if (sb == null) {
+            sb = new StringBuilder(end - start);
+            sb.append(s, start, i);
+          }
+          if (!prevSpace) sb.append(' ');
+        } else if (sb != null) {
+          sb.append(' ');
+        }
+        prevSpace = true;
+      } else {
+        if (sb != null) sb.append(c);
+        prevSpace = false;
+      }
+    }
+    return sb != null ? sb.toString() : (start == 0 && end == len ? s : s.substring(start, end));
+  }
+
+  private static boolean isSpaceOrUnderscore(char c, boolean underscoreToSpace) {
+    return (underscoreToSpace && c == '_') || Character.isWhitespace(c);
+  }
+
+  private static boolean hasBracket(String s) {
+    for (int i = 0; i < s.length(); i++) {
+      char c = s.charAt(i);
+      if (c == '[' || c == '(' || c == '{' || c == '【') return true;
+    }
+    return false;
+  }
+
+  private static String trimEdgePunctuation(String s) {
+    int start = 0, end = s.length();
+    while (start < end && isEdgePunct(s.charAt(start))) start++;
+    while (end > start && isEdgePunct(s.charAt(end - 1))) end--;
+    return start == 0 && end == s.length() ? s : s.substring(start, end);
+  }
+
+  private static boolean isEdgePunct(char c) {
+    return Character.isWhitespace(c) || c == '-' || c == '–' || c == '—' || c == ':' || c == '~';
+  }
+
+  /** "001" -> "1", "01.50" -> "1.5", "0" -> "0". (정규식 없이 문자 스캔) */
+  static String normalizeNumberText(String raw) {
+    if (raw == null || raw.isEmpty()) return "";
+    int start = 0, end = raw.length();
+    while (start < end && raw.charAt(start) <= ' ') start++;
+    while (end > start && raw.charAt(end - 1) <= ' ') end--;
+    if (start >= end) return "";
+    int dot = -1;
+    for (int i = start; i < end; i++) {
+      char c = raw.charAt(i);
+      if (c == '.') {
+        if (dot >= 0 || i == start || i == end - 1) return "";
+        dot = i;
+      } else if (c < '0' || c > '9') {
+        return "";
+      }
+    }
+    int wholeEnd = dot < 0 ? end : dot;
+    int wholeStart = start;
+    while (wholeStart < wholeEnd - 1 && raw.charAt(wholeStart) == '0') wholeStart++;
+    if (dot < 0) return raw.substring(wholeStart, wholeEnd);
+    int fracEnd = end;
+    while (fracEnd > dot + 1 && raw.charAt(fracEnd - 1) == '0') fracEnd--;
+    if (fracEnd == dot + 1) return raw.substring(wholeStart, wholeEnd);
+    return raw.substring(wholeStart, wholeEnd) + "." + raw.substring(dot + 1, fracEnd);
   }
 
   static double parseDoubleSafe(String numText, double fallback) {
@@ -200,11 +308,18 @@ final class Order {
   }
 
   static Volume volume(String filename) {
-    String name =
-        Normalizer.normalize(stem(filename), Normalizer.Form.NFKC)
-            .replace('_', ' ')
-            .trim()
-            .replaceAll("\\s+", " ");
+    String key = filename == null ? "" : filename;
+    Volume cached = VOLUME_CACHE.get(key);
+    if (cached != null) return cached;
+    Volume parsed = parseVolume(key);
+    if (VOLUME_CACHE.size() > CACHE_LIMIT) VOLUME_CACHE.clear();
+    VOLUME_CACHE.put(key, parsed);
+    return parsed;
+  }
+
+  private static Volume parseVolume(String filename) {
+    String name = fastNormalizeSpaces(stem(filename));
+    if (name.isEmpty()) return new Volume("", -1);
     String working = VOLUME_COMPLETE_GLUED.matcher(name).replaceAll("$1$2");
     String distinctTag = "";
     String clean = working, before;
@@ -215,23 +330,25 @@ final class Order {
     do {
       before = clean;
       clean = TAGS.matcher(clean).replaceFirst("").trim();
-      Matcher tm = TRAILING_TAG.matcher(clean);
-      if (tm.find() && tm.start() > 0) {
-        String block = tm.group(1);
-        if (RANGE_BRACKET.matcher(block).matches()) {
-          String inner = block.substring(1, block.length() - 1).trim();
-          Matcher rm = RANGE.matcher(" " + inner);
-          if (rm.find()) rangeLabel = formatRange(rm);
-          clean = clean.substring(0, tm.start()).trim();
-          range = true;
-          continue;
-        }
-        if (!VOLUME_BRACKET.matcher(block).matches()) {
-          if (DISTINCT.matcher(block).matches()) {
-            if (distinctTag.isEmpty()) distinctTag = block;
+      if (hasBracket(clean)) {
+        Matcher tm = TRAILING_TAG.matcher(clean);
+        if (tm.find() && tm.start() > 0) {
+          String block = tm.group(1);
+          if (RANGE_BRACKET.matcher(block).matches()) {
+            String inner = block.substring(1, block.length() - 1).trim();
+            Matcher rm = RANGE.matcher(" " + inner);
+            if (rm.find()) rangeLabel = formatRange(rm);
+            clean = clean.substring(0, tm.start()).trim();
+            range = true;
+            continue;
           }
-          clean = clean.substring(0, tm.start()).trim();
-          continue;
+          if (!VOLUME_BRACKET.matcher(block).matches()) {
+            if (DISTINCT.matcher(block).matches()) {
+              if (distinctTag.isEmpty()) distinctTag = block;
+            }
+            clean = clean.substring(0, tm.start()).trim();
+            continue;
+          }
         }
       }
       Matcher rm = RANGE.matcher(clean);
@@ -245,7 +362,7 @@ final class Order {
       }
     } while (!clean.equals(before));
 
-    // 2. 앞쪽 괄호 태그([원본], [완결], [2024] 등) 및 [웹툰] 제거 (단, 권수 괄호만 남는 경우는 유지)
+    // 2. 앞쪽 괄호 태그([원본], [완결], [2024] 등) 및 [웹툰] 제거
     clean = stripLeadingNoise(clean);
 
     // 1~74권 같은 범위 표기는 한 권이 아니라 작품 전체이므로 권 번호 없이 작품명만 쓴다.
@@ -304,7 +421,8 @@ final class Order {
     }
 
     String seriesClean = cleanSeriesTitle(clean);
-    return new Volume(seriesClean.isEmpty() ? name : seriesClean, -1, "", -1, "권", "", "", distinctTag);
+    return new Volume(
+        seriesClean.isEmpty() ? name : seriesClean, -1, "", -1, "권", "", "", distinctTag);
   }
 
   private static String normalizeUnit(String u) {
@@ -340,10 +458,13 @@ final class Order {
   }
 
   private static String stripLeadingNoise(String title) {
-    String s = LEADING_WEBTOON.matcher(title).replaceFirst("").trim();
-    // 앞쪽 괄호가 권 번호만 담은 괄호([3권], (03))가 아니면 제거
-    while (true) {
-      Matcher m = Pattern.compile("^\\s*(" + BRACKET + ")\\s*").matcher(s);
+    if (title.isEmpty()) return title;
+    String s = title;
+    if (s.charAt(0) == '[' || s.charAt(0) == '웹' || Character.isWhitespace(s.charAt(0))) {
+      s = LEADING_WEBTOON.matcher(s).replaceFirst("").trim();
+    }
+    while (!s.isEmpty() && (s.charAt(0) == '[' || s.charAt(0) == '(' || s.charAt(0) == '{' || s.charAt(0) == '【')) {
+      Matcher m = LEADING_BRACKET_ONE.matcher(s);
       if (!m.find()) break;
       String block = m.group(1);
       if (VOLUME_BRACKET.matcher(block).matches()) break;
@@ -356,15 +477,13 @@ final class Order {
 
   /**
    * 작품명 내부/앞뒤에 섞인 노이즈 태그(원본, 공금, 스캔본, 고화질, [완결] 등)를 제거해
-   * 깨끗한 만화 제목을 반환한다. (Bomulseom extract_series_name + MLS 규칙 통합)
+   * 깨끗한 만화 제목을 반환한다. (Bomulseom + MLS 규칙 통합, 사전 컴파일 + 캐시)
    */
   static String cleanSeriesTitle(String raw) {
-    if (raw == null) return "";
-    String s =
-        Normalizer.normalize(raw, Normalizer.Form.NFKC)
-            .replace('_', ' ')
-            .trim()
-            .replaceAll("\\s+", " ");
+    if (raw == null || raw.isEmpty()) return "";
+    String cached = CLEAN_CACHE.get(raw);
+    if (cached != null) return cached;
+    String s = fastNormalizeSpaces(raw);
     if (s.isEmpty()) return "";
     String before;
     do {
@@ -375,20 +494,27 @@ final class Order {
       if (!cutRange.isEmpty()) s = cutRange;
       String noAuthor = AUTHOR_CREDIT_TAIL.matcher(s).replaceFirst("").trim();
       if (!noAuthor.isEmpty()) s = noAuthor;
-      // 중간에 낀 괄호 태그 ([완결], (원본), [고화질] 등) 제거
-      String noInlineBracket =
-          s.replaceAll("(?iu)\\s*[\\[\\(\\{【]\\s*" + NOISE_TOKEN + "\\s*[\\]\\)\\}】]\\s*", " ")
-              .trim();
-      if (!noInlineBracket.isEmpty()) s = noInlineBracket;
-      // 중간에 낀 단독 노이즈 단어 제거 (예: "나루토 원본" -> "나루토", "원피스 공금" -> "원피스")
-      String noInline = INLINE_NOISE.matcher(s).replaceAll(" ").replaceAll("\\s+", " ").trim();
+      if (hasBracket(s)) {
+        String noInlineBracket =
+            collapseSpaces(INLINE_BRACKET_NOISE.matcher(s).replaceAll(" "), false);
+        if (!noInlineBracket.isEmpty()) s = noInlineBracket;
+      }
+      String noInline = collapseSpaces(INLINE_NOISE.matcher(s).replaceAll(" "), false);
       if (!noInline.isEmpty()) s = noInline;
-      s = s.replaceAll("^[\\s\\-–—:~]+|[\\s\\-–—:~]+$", "").trim();
+      s = trimEdgePunctuation(s);
     } while (!s.equals(before));
-    return s.isEmpty() ? raw.trim() : s;
+    String result = s.isEmpty() ? raw.trim() : s;
+    if (CLEAN_CACHE.size() > CACHE_LIMIT) CLEAN_CACHE.clear();
+    CLEAN_CACHE.put(raw, result);
+    return result;
   }
 
   static String withoutLeadingTags(String title) {
+    if (title.isEmpty()) return title;
+    char first = title.charAt(0);
+    if (first != '[' && first != '(' && first != '{' && first != '【' && !Character.isWhitespace(first)) {
+      return title.trim();
+    }
     String rest = LEADING_TAGS.matcher(title).replaceFirst("").trim();
     return rest.isEmpty() ? title.trim() : rest;
   }
@@ -396,7 +522,9 @@ final class Order {
   /** 뒤쪽 괄호 문구를 차례로 뗀다. keepDistinct면 외전 같은 구별 문구에서 멈춘다. */
   static String stripTrailing(String title, boolean keepDistinct) {
     String s = title.trim();
-    while (true) {
+    while (!s.isEmpty()) {
+      char last = s.charAt(s.length() - 1);
+      if (last != ']' && last != ')' && last != '}' && last != '】') return s;
       Matcher m = TRAILING_TAG.matcher(s);
       if (!m.find() || m.start() == 0) return s;
       String block = m.group(1);
@@ -404,16 +532,12 @@ final class Order {
       if (keepDistinct && DISTINCT.matcher(block).matches()) return s;
       s = s.substring(0, m.start()).trim();
     }
+    return s;
   }
 
   /** 앞뒤 괄호 문구, 띄어쓰기·밑줄·문장부호 차이를 무시하는 시리즈 비교 키. */
   static String seriesKey(String series) {
-    String name =
-        Normalizer.normalize(series == null ? "" : series, Normalizer.Form.NFKC)
-            .replace('_', ' ')
-            .replaceAll("\\s+", " ")
-            .trim()
-            .toLowerCase(Locale.ROOT);
+    String name = fastNormalizeSpaces(series).toLowerCase(Locale.ROOT);
     String bare = cleanSeriesTitle(name).toLowerCase(Locale.ROOT);
     String key = KEY_SEPARATORS.matcher(bare).replaceAll("");
     return key.isEmpty() ? name.replace(" ", "") : key;
@@ -427,17 +551,14 @@ final class Order {
   /** MLS resolve_smart_title 규칙: 스캔본/고화질/Download 같은 무의미 폴더를 건너뛰고 작품 폴더명을 찾는다. */
   static boolean isGarbageOrVariantFolder(String name) {
     if (name == null) return true;
-    String n =
-        Normalizer.normalize(name, Normalizer.Form.NFKC)
-            .replace('_', ' ')
-            .replaceAll("\\s+", " ")
-            .trim()
-            .toLowerCase(Locale.ROOT);
+    String n = fastNormalizeSpaces(name).toLowerCase(Locale.ROOT);
     if (n.isEmpty()) return true;
     if (GARBAGE_FOLDERS.contains(n)) return true;
     if (FOLDER_INDEX_OR_RES.matcher(n).matches()) return true;
     String bare = cleanSeriesTitle(n).toLowerCase(Locale.ROOT);
-    return bare.isEmpty() || GARBAGE_FOLDERS.contains(bare) || FOLDER_INDEX_OR_RES.matcher(bare).matches();
+    return bare.isEmpty()
+        || GARBAGE_FOLDERS.contains(bare)
+        || FOLDER_INDEX_OR_RES.matcher(bare).matches();
   }
 
   static String percentDecode(String s) {
@@ -463,14 +584,12 @@ final class Order {
   static String resolveFolderSeries(String parent) {
     if (parent == null || parent.isEmpty() || "single".equals(parent)) return "";
     String decoded = percentDecode(parent).replace('\\', '/');
-    // smb://host/share/dir/... 의 경우 scheme+host+share 제거 (먼저 처리해 ':' 오인 방지)
     String pathPart = decoded;
     if (pathPart.startsWith("smb://")) {
       int s1 = pathPart.indexOf('/', 6);
       int s2 = s1 >= 0 ? pathPart.indexOf('/', s1 + 1) : -1;
       pathPart = s2 >= 0 ? pathPart.substring(s2 + 1) : "";
     } else {
-      // content:// tree document id는 "primary:Comics/나루토/스캔본" 형태일 수 있다.
       int colon = pathPart.lastIndexOf(':');
       if (colon >= 0) pathPart = pathPart.substring(colon + 1);
     }
@@ -491,11 +610,7 @@ final class Order {
   static String shelfTitle(String title, boolean hideTags) {
     if (title == null) return "";
     if (!hideTags) return title;
-    String normalized =
-        Normalizer.normalize(title, Normalizer.Form.NFKC)
-            .replace('_', ' ')
-            .trim()
-            .replaceAll("\\s+", " ");
+    String normalized = fastNormalizeSpaces(title);
     String name = withoutLeadingTags(normalized);
     String before;
     do {
@@ -517,30 +632,47 @@ final class Order {
 
   /**
    * 그룹 내에서 가장 읽기 좋은 대표 작품명을 고른다.
-   * ComicInfo.xml의 Series가 있으면 최우선, 사용자가 수동 지정한 이름도 보존,
-   * 그 외에는 띄어쓰기·대소문자 가독성이 높은 제목을 선택한다.
+   * 동일 series 문자열은 중복 정리하지 않고 한 번만 평가한다.
    */
   static String bestSeriesTitle(List<Library.Book> group, boolean hideTags) {
     if (group == null || group.isEmpty()) return "";
     if (!hideTags) return group.get(0).series;
-    for (Library.Book b : group) {
-      if (b.manualGroup && b.series != null && !b.series.trim().isEmpty()) {
+    for (int i = 0; i < group.size(); i++) {
+      Library.Book b = group.get(i);
+      if (b.manualGroup && b.series != null && !b.series.isEmpty()) {
         return b.series.trim();
       }
     }
     String comicBest = "";
-    for (Library.Book b : group) {
-      if (b.comicSeries != null && !b.comicSeries.trim().isEmpty()) {
-        String c = cleanSeriesTitle(b.comicSeries);
-        if (!c.isEmpty() && readabilityScore(c) > readabilityScore(comicBest)) comicBest = c;
+    int comicBestScore = Integer.MIN_VALUE;
+    for (int i = 0; i < group.size(); i++) {
+      String cs = group.get(i).comicSeries;
+      if (cs != null && !cs.isEmpty()) {
+        String c = cleanSeriesTitle(cs);
+        int sc = readabilityScore(c);
+        if (!c.isEmpty() && sc > comicBestScore) {
+          comicBest = c;
+          comicBestScore = sc;
+        }
       }
     }
     if (!comicBest.isEmpty()) return comicBest;
+    // 대부분 같은 series 문자열을 공유하므로 먼저 원본 빈도만 집계한 뒤 고유 문자열만 정리한다.
+    Map<String, Integer> rawCounts = new LinkedHashMap<>();
+    for (int i = 0; i < group.size(); i++) {
+      String raw = group.get(i).series;
+      if (raw != null && !raw.isEmpty()) rawCounts.put(raw, rawCounts.getOrDefault(raw, 0) + 1);
+    }
+    if (rawCounts.size() == 1) {
+      String only = rawCounts.keySet().iterator().next();
+      String c = cleanSeriesTitle(only);
+      return c.isEmpty() ? shelfTitle(only, true) : c;
+    }
     Map<String, Integer> counts = new LinkedHashMap<>();
-    for (Library.Book b : group) {
-      String c = cleanSeriesTitle(b.series);
-      if (c.isEmpty()) c = shelfTitle(b.series, true);
-      if (!c.isEmpty()) counts.put(c, counts.getOrDefault(c, 0) + 1);
+    for (Map.Entry<String, Integer> e : rawCounts.entrySet()) {
+      String c = cleanSeriesTitle(e.getKey());
+      if (c.isEmpty()) c = shelfTitle(e.getKey(), true);
+      if (!c.isEmpty()) counts.put(c, counts.getOrDefault(c, 0) + e.getValue());
     }
     String best = "";
     int bestScore = Integer.MIN_VALUE;
@@ -583,13 +715,13 @@ final class Order {
     if (numText.isEmpty() && v.number >= 0) numText = v.numberText;
     if (!numText.isEmpty()) {
       String unit = "화".equals(v.unit) ? "화" : "권";
-      StringBuilder sb = new StringBuilder();
+      StringBuilder sb = new StringBuilder(base.length() + numText.length() + 8);
       sb.append(base).append(' ').append(numText).append(unit);
       if (!v.distinctTag.isEmpty()) sb.append(' ').append(v.distinctTag);
       return sb.toString();
     }
     if (!v.partLabel.isEmpty()) {
-      StringBuilder sb = new StringBuilder();
+      StringBuilder sb = new StringBuilder(base.length() + 8);
       sb.append(base).append(' ').append(v.partLabel).append('권');
       if (!v.distinctTag.isEmpty()) sb.append(' ').append(v.distinctTag);
       return sb.toString();
@@ -608,6 +740,42 @@ final class Order {
     if ("중".equals(part)) return 2;
     if ("하".equals(part)) return 3;
     return Integer.MAX_VALUE;
+  }
+
+  private static final class BookKey {
+    final Library.Book book;
+    final double sortNumber;
+    final int partOrder;
+
+    BookKey(Library.Book book, double sortNumber, int partOrder) {
+      this.book = book;
+      this.sortNumber = sortNumber;
+      this.partOrder = partOrder;
+    }
+  }
+
+  /** 권 정렬 시 각 권의 파싱 키를 1회만 계산(O(N))해 비교 비용을 최소화한다. */
+  static void sortBooks(List<Library.Book> group) {
+    int n = group.size();
+    if (n <= 1) return;
+    BookKey[] keys = new BookKey[n];
+    for (int i = 0; i < n; i++) {
+      Library.Book b = group.get(i);
+      String cn = normalizeNumberText(b.comicNumber);
+      Volume v = cn.isEmpty() ? volume(b.title) : null;
+      double num = !cn.isEmpty() ? parseDoubleSafe(cn, -1) : v.sortNumber;
+      int part = v != null ? partOrder(v.partLabel) : Integer.MAX_VALUE;
+      keys[i] = new BookKey(b, num < 0 ? Double.MAX_VALUE : num, part);
+    }
+    Arrays.sort(
+        keys,
+        (a, b) -> {
+          int d = Double.compare(a.sortNumber, b.sortNumber);
+          if (d != 0) return d;
+          int p = Integer.compare(a.partOrder, b.partOrder);
+          return p == 0 ? natural(a.book.title, b.book.title) : p;
+        });
+    for (int i = 0; i < n; i++) group.set(i, keys[i].book);
   }
 
   static int compareBooks(Library.Book a, Library.Book b) {
@@ -636,19 +804,24 @@ final class Order {
     return p == 0 ? natural(a, b) : p;
   }
 
+  /** 정규식·부분 문자열 할당 없이 자연 정렬을 수행한다. */
   static int natural(String a, String b) {
-    int i = 0, j = 0;
-    while (i < a.length() && j < b.length()) {
+    int i = 0, j = 0, al = a.length(), bl = b.length();
+    while (i < al && j < bl) {
       char x = Character.toLowerCase(a.charAt(i)), y = Character.toLowerCase(b.charAt(j));
       if (x >= '0' && x <= '9' && y >= '0' && y <= '9') {
         int e = i, f = j;
-        while (e < a.length() && a.charAt(e) >= '0' && a.charAt(e) <= '9') e++;
-        while (f < b.length() && b.charAt(f) >= '0' && b.charAt(f) <= '9') f++;
-        String p = a.substring(i, e).replaceFirst("^0+(?!$)", ""),
-            q = b.substring(j, f).replaceFirst("^0+(?!$)", "");
-        int d = Integer.compare(p.length(), q.length());
-        if (d == 0) d = p.compareTo(q);
-        if (d != 0) return d;
+        while (e < al && a.charAt(e) >= '0' && a.charAt(e) <= '9') e++;
+        while (f < bl && b.charAt(f) >= '0' && b.charAt(f) <= '9') f++;
+        int p = i, q = j;
+        while (p < e - 1 && a.charAt(p) == '0') p++;
+        while (q < f - 1 && b.charAt(q) == '0') q++;
+        int pl = e - p, ql = f - q;
+        if (pl != ql) return Integer.compare(pl, ql);
+        while (p < e) {
+          char pc = a.charAt(p++), qc = b.charAt(q++);
+          if (pc != qc) return pc - qc;
+        }
         i = e;
         j = f;
       } else {
@@ -660,7 +833,7 @@ final class Order {
         j++;
       }
     }
-    return Integer.compare(a.length() - i, b.length() - j);
+    return Integer.compare(al - i, bl - j);
   }
 
   static int rank(char c) {
@@ -670,19 +843,37 @@ final class Order {
 
   static int coverRank(String path) {
     String p = path.toLowerCase(Locale.ROOT);
-    String name = p.substring(p.lastIndexOf('/') + 1).replaceFirst("\\.[^.]*$", "");
-    if (name.matches("cover|front|frontcover|표지|表紙")) return 0;
-    if (name.matches(".*(?:back|rear|뒤표지|뒷표지|裏表紙).*")) return 4;
-    if (name.matches(".*(?:cover|front|표지|表紙).*") || p.matches(".*(?:^|/)(?:covers?|표지)/.*"))
-      return 1;
+    int slash = p.lastIndexOf('/');
+    String file = slash >= 0 ? p.substring(slash + 1) : p;
+    int dot = file.lastIndexOf('.');
+    String name = dot >= 0 ? file.substring(0, dot) : file;
+    if (COVER_EXACT.matcher(name).matches()) return 0;
+    if (COVER_BACK.matcher(name).matches()) return 4;
+    if (COVER_PART.matcher(name).matches() || COVER_DIR.matcher(p).matches()) return 1;
     return 3;
   }
 
   static boolean image(String path) {
-    String p = path.toLowerCase(Locale.ROOT).replace('\\', '/');
-    for (String part : p.split("/"))
-      if (part.startsWith(".") || part.equals("__macosx")) return false;
-    return p.matches("(?s).*\\.(jpe?g|png|webp)$");
+    if (path == null || path.isEmpty()) return false;
+    int len = path.length();
+    int dot = path.lastIndexOf('.');
+    if (dot < 0 || len - dot > 5) return false;
+    String ext = path.substring(dot + 1).toLowerCase(Locale.ROOT);
+    if (!ext.equals("jpg") && !ext.equals("jpeg") && !ext.equals("png") && !ext.equals("webp")) {
+      return false;
+    }
+    int start = 0;
+    for (int i = 0; i <= len; i++) {
+      if (i == len || path.charAt(i) == '/' || path.charAt(i) == '\\') {
+        int partLen = i - start;
+        if (partLen > 0) {
+          if (path.charAt(start) == '.') return false;
+          if (partLen == 8 && path.regionMatches(true, start, "__macosx", 0, 8)) return false;
+        }
+        start = i + 1;
+      }
+    }
+    return true;
   }
 
   static int[] spreadWithWidePages(

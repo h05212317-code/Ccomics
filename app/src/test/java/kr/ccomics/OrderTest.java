@@ -104,6 +104,26 @@ public class OrderTest {
   }
 
   @Test
+  public void largeLibraryParsingAndSortingStaysFast() {
+    List<String> titles = new ArrayList<>(2000);
+    for (int s = 1; s <= 200; s++) {
+      for (int v = 1; v <= 10; v++) {
+        titles.add("[원본] 만화작품" + s + "_스캔본_" + String.format("%03d", v) + "권 [1500px].zip");
+      }
+    }
+    long start = System.nanoTime();
+    for (String t : titles) {
+      Order.Volume vol = Order.volume(t);
+      assertTrue(vol.number >= 1 && vol.number <= 10);
+      Order.cleanSeriesTitle(vol.title);
+    }
+    // 2회차 캐시 히트 + natural 정렬 포함 전체 처리가 충분히 빨라야 한다.
+    titles.sort(Order::natural);
+    long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
+    assertTrue("2000개 파싱·정렬이 너무 느립니다: " + elapsedMs + "ms", elapsedMs < 1500);
+  }
+
+  @Test
   public void hideOnlyFileTagsFollowingVolumeNumbers() {
     String name = "[개정판] 하늘 2권 (원본) [1500PX]";
     assertEquals("하늘 2권", Order.shelfTitle(name, true));
