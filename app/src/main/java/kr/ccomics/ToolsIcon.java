@@ -57,6 +57,16 @@ final class ToolsIcon extends View {
         line(c, 14, 9, 17, 6);
         line(c, 20, 9, 17, 6);
         break;
+      case "arrange":
+        c.drawRoundRect(4, 4, 10, 10, 1.5f, 1.5f, p);
+        c.drawRoundRect(14, 4, 20, 10, 1.5f, 1.5f, p);
+        c.drawRoundRect(4, 14, 10, 20, 1.5f, 1.5f, p);
+        c.drawRoundRect(14, 14, 20, 20, 1.5f, 1.5f, p);
+        break;
+      case "check":
+        line(c, 5, 12, 10, 17);
+        line(c, 10, 17, 19, 7);
+        break;
       case "back":
         line(c, 5, 12, 19, 12);
         line(c, 5, 12, 11, 6);

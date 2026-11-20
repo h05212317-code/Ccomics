@@ -258,7 +258,8 @@ public class ReaderFrameTest {
     host.setContentView(host.frame);
     host.prefs
         .edit()
-        .putInt("sortDefaultVersion", 1)
+        .putInt("sortDefaultVersion", 2)
+        .putBoolean("groupByRating", false)
         .putInt("sort", Main.SORT_TITLE)
         .putBoolean("sortDesc", false)
         .apply();
@@ -288,46 +289,99 @@ public class ReaderFrameTest {
   }
 
   @Test
-  public void starRatingSortDefaultsDescendingAndGroupsByStarSections() {
+  public void ratingGroupingToggleIsIndependentOfSortAndCustomOrderRespectsRatingBoundary()
+      throws Exception {
     host.frame = new android.widget.FrameLayout(host);
     host.setContentView(host.frame);
     host.prefs.edit().clear().apply();
-    assertEquals(Main.SORT_RATING, host.currentSort());
-    assertTrue(host.currentSortDesc());
-    assertEquals("별점순 ↓", host.sortLabel(host.currentSort(), host.currentSortDesc()));
+    // 기본값: 별점순 표시하기 ON, 제목순 ↑
+    assertTrue(host.groupByRating());
+    assertEquals(Main.SORT_TITLE, host.currentSort());
+    assertFalse(host.currentSortDesc());
 
-    host.db.exec("UPDATE books SET title='나루토 001권',series='나루토',grp='series:나루토',rating=5 WHERE id=1");
     host.db.exec(
-        "INSERT INTO books(id,title,series,grp,rating,pages) VALUES(2,'원피스 1권','원피스','series:원피스',3,10)");
+        "UPDATE books SET title='나루토 001권',series='나루토',grp='series:나루토',rating=5 WHERE id=1");
     host.db.exec(
-        "INSERT INTO books(id,title,series,grp,rating,pages) VALUES(3,'블리치 1권','블리치','series:블리치',0,10)");
+        "INSERT INTO books(id,title,series,grp,rating,pages) VALUES(2,'가정교사 1권','가정교사','series:가정교사',5,10)");
+    host.db.exec(
+        "INSERT INTO books(id,title,series,grp,rating,pages) VALUES(3,'원피스 1권','원피스','series:원피스',3,10)");
+    host.db.exec(
+        "INSERT INTO books(id,title,series,grp,rating,pages) VALUES(4,'블리치 1권','블리치','series:블리치',0,10)");
     host.books = host.db.books();
     host.groups.clear();
     for (Library.Book b : host.books)
       host.groups.computeIfAbsent(b.grp, k -> new java.util.ArrayList<>()).add(b);
 
+    // 1. 별점순 표시하기 ON + 제목순 ↑ → 5→3→0 섹션, 5점 섹션 내부는 가나다순(가정교사 → 나루토)
     host.selected = "";
     host.renderLibrary();
     assertNotNull(host.shelfList);
     assertNotNull(host.sectionAdapter);
+    assertTrue(host.sectionAdapter.showHeaders);
     assertEquals(3, host.sectionAdapter.sections.size());
     assertEquals(5, host.sectionAdapter.sections.get(0).rating);
+    assertEquals("가정교사", host.sectionAdapter.sections.get(0).items.get(0).title);
+    assertEquals("나루토", host.sectionAdapter.sections.get(0).items.get(1).title);
     assertEquals(3, host.sectionAdapter.sections.get(1).rating);
     assertEquals(0, host.sectionAdapter.sections.get(2).rating);
-    assertEquals("★★★★★", Main.stars(5));
-    assertEquals("★★★☆☆", Main.stars(3));
-    assertEquals("☆☆☆☆☆", Main.stars(0));
 
-    // 슬라이더 크기 변경 시 별점 섹션 어댑터도 즉시 반영
+    // 슬라이더 크기 변경 시 별점 섹션 어댑터 즉시 반영
     host.applyThumbWidth(170);
     assertEquals(170, host.sectionAdapter.widthDp);
 
-    // 역방향(오름차순 ↑) 전환 시 0점 → 3점 → 5점 순서
-    host.prefs.edit().putBoolean("sortDesc", false).apply();
+    // 2. 별점순 표시하기 ON + 제목순 ↓ → 섹션은 5→3→0 유지, 5점 섹션 내부만 역순(나루토 → 가정교사)
+    host.prefs.edit().putBoolean("sortDesc", true).apply();
     host.renderLibrary();
-    assertEquals(0, host.sectionAdapter.sections.get(0).rating);
-    assertEquals(3, host.sectionAdapter.sections.get(1).rating);
-    assertEquals(5, host.sectionAdapter.sections.get(2).rating);
+    assertEquals(5, host.sectionAdapter.sections.get(0).rating);
+    assertEquals("나루토", host.sectionAdapter.sections.get(0).items.get(0).title);
+    assertEquals("가정교사", host.sectionAdapter.sections.get(0).items.get(1).title);
+
+    // 3. 사용자 정의 정렬 + 배치 모드 아이콘 표시 확인 + 같은 별점 섹션 내부만 이동 허용
+    host.prefs.edit().putInt("sort", Main.SORT_CUSTOM).putBoolean("sortDesc", false).apply();
+    host.renderLibrary();
+    android.view.ViewGroup topBar = (android.view.ViewGroup) host.root.getChildAt(0);
+    boolean foundArrangeIcon = false;
+    for (int i = 0; i < topBar.getChildCount(); i++) {
+      CharSequence desc = topBar.getChildAt(i).getContentDescription();
+      if (desc != null && "배치 모드".equals(desc.toString())) foundArrangeIcon = true;
+    }
+    assertTrue("사용자 정의 정렬에서 배치 모드 아이콘이 표시되어야 합니다", foundArrangeIcon);
+
+    host.arrangeMode = true;
+    host.renderLibrary();
+    assertNotNull(host.dragController);
+
+    // 같은 별점 섹션(5점: 가정교사, 나루토) 내 이동은 성공
+    assertEquals("가정교사", host.sectionAdapter.sections.get(0).items.get(0).title);
+    assertTrue(host.reorderCustomSection(0, 0, 0, 1));
+    assertEquals("나루토", host.sectionAdapter.sections.get(0).items.get(0).title);
+    assertEquals("가정교사", host.sectionAdapter.sections.get(0).items.get(1).title);
+
+    // 다른 별점 섹션(5점 → 3점) 이동은 차단
+    assertFalse(host.reorderCustomSection(0, 0, 1, 0));
+
+    // 다시 그려도 사용자 정의 순서 유지
+    host.arrangeMode = false;
+    host.renderLibrary();
+    assertEquals("나루토", host.sectionAdapter.sections.get(0).items.get(0).title);
+    assertEquals("가정교사", host.sectionAdapter.sections.get(0).items.get(1).title);
+
+    // 4. 별점순 표시하기 OFF + 사용자 정의 → 단일 평면 섹션에서 다른 별점 작품끼리도 자유 이동 가능
+    host.prefs.edit().putBoolean("groupByRating", false).apply();
+    host.arrangeMode = true;
+    host.renderLibrary();
+    assertFalse(host.sectionAdapter.showHeaders);
+    assertEquals(1, host.sectionAdapter.sections.size());
+    assertEquals(4, host.sectionAdapter.sections.get(0).items.size());
+    String firstBefore = host.sectionAdapter.sections.get(0).items.get(0).title;
+    String lastBefore = host.sectionAdapter.sections.get(0).items.get(3).title;
+    assertTrue(host.reorderCustomSection(0, 3, 0, 0));
+    assertEquals(lastBefore, host.sectionAdapter.sections.get(0).items.get(0).title);
+    assertEquals(firstBefore, host.sectionAdapter.sections.get(0).items.get(1).title);
+
+    // 뒤로가기 시 배치 모드 종료
+    host.onBackPressed();
+    assertFalse(host.arrangeMode);
   }
 
   Bitmap draw() {

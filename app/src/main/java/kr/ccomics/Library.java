@@ -21,7 +21,7 @@ final class Library extends SQLiteOpenHelper {
   final File covers;
 
   Library(Context c) {
-    super(c, "library.db", null, 5);
+    super(c, "library.db", null, 6);
     ctx = c;
     setWriteAheadLoggingEnabled(true);
     covers = new File(c.getFilesDir(), "covers");
@@ -43,6 +43,7 @@ final class Library extends SQLiteOpenHelper {
     db.execSQL("ALTER TABLE books ADD COLUMN rating INTEGER DEFAULT 0");
     db.execSQL("ALTER TABLE books ADD COLUMN comicSeries TEXT DEFAULT ''");
     db.execSQL("ALTER TABLE books ADD COLUMN comicNumber TEXT DEFAULT ''");
+    db.execSQL("ALTER TABLE books ADD COLUMN customOrder INTEGER DEFAULT 0");
     db.execSQL("CREATE INDEX series_index ON books(grp)");
     db.execSQL("CREATE TABLE shelves(name TEXT PRIMARY KEY)");
     db.execSQL("CREATE TABLE marks(book INTEGER,page INTEGER,PRIMARY KEY(book,page))");
@@ -57,12 +58,15 @@ final class Library extends SQLiteOpenHelper {
       db.execSQL("ALTER TABLE books ADD COLUMN comicSeries TEXT DEFAULT ''");
       db.execSQL("ALTER TABLE books ADD COLUMN comicNumber TEXT DEFAULT ''");
     }
+    if (from < 6) {
+      db.execSQL("ALTER TABLE books ADD COLUMN customOrder INTEGER DEFAULT 0");
+    }
   }
 
   static class Book {
     long id, source, size, changed, opened;
     String url, title, series, grp, shelf, cover, error, comicSeries, comicNumber;
-    int pages, page, rating;
+    int pages, page, rating, customOrder;
     boolean fav, done, rep, missing, manualGroup;
 
     Book(Cursor c) {
@@ -88,6 +92,7 @@ final class Library extends SQLiteOpenHelper {
       manualGroup = c.getInt(19) == 1;
       comicSeries = str(c, 20);
       comicNumber = str(c, 21);
+      customOrder = c.getInt(22);
     }
 
     private static String str(Cursor c, int index) {
@@ -98,7 +103,7 @@ final class Library extends SQLiteOpenHelper {
 
   static final String SELECT =
       "SELECT"
-          + " id,source,url,title,series,grp,shelf,size,changed,pages,page,opened,done,fav,cover,rep,missing,error,rating,manualGroup,comicSeries,comicNumber"
+          + " id,source,url,title,series,grp,shelf,size,changed,pages,page,opened,done,fav,cover,rep,missing,error,rating,manualGroup,comicSeries,comicNumber,customOrder"
           + " FROM books";
 
   List<Book> books() {
@@ -357,6 +362,37 @@ final class Library extends SQLiteOpenHelper {
         getReadableDatabase()
             .rawQuery("SELECT coalesce(max(rating),0) FROM books WHERE grp=?", new String[] {group})) {
       return c.moveToFirst() ? c.getInt(0) : 0;
+    }
+  }
+
+  int groupCustomOrder(String group) {
+    try (Cursor c =
+        getReadableDatabase()
+            .rawQuery(
+                "SELECT coalesce(max(customOrder),0) FROM books WHERE grp=?",
+                new String[] {group})) {
+      return c.moveToFirst() ? c.getInt(0) : 0;
+    }
+  }
+
+  void saveCustomOrders(Map<String, Integer> orders) {
+    if (orders == null || orders.isEmpty()) return;
+    SQLiteDatabase database = getWritableDatabase();
+    database.beginTransactionNonExclusive();
+    try {
+      SQLiteStatement stmt = database.compileStatement("UPDATE books SET customOrder=? WHERE grp=?");
+      try {
+        for (Map.Entry<String, Integer> e : orders.entrySet()) {
+          stmt.bindLong(1, e.getValue());
+          stmt.bindString(2, e.getKey());
+          stmt.executeUpdateDelete();
+        }
+      } finally {
+        stmt.close();
+      }
+      database.setTransactionSuccessful();
+    } finally {
+      database.endTransaction();
     }
   }
 
@@ -652,6 +688,7 @@ final class Library extends SQLiteOpenHelper {
     v.put("series", series);
     v.put("grp", group);
     v.put("rating", groupRating(group));
+    v.put("customOrder", groupCustomOrder(group));
     v.put("size", size);
     v.put("changed", changed);
     v.put("seen", token);

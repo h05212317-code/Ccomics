@@ -1,5 +1,6 @@
 package kr.ccomics;
 
+import android.animation.*;
 import android.app.*;
 import android.content.*;
 import android.content.res.Configuration;
@@ -11,6 +12,8 @@ import android.text.*;
 import android.text.style.ForegroundColorSpan;
 import android.util.LruCache;
 import android.view.*;
+import android.view.animation.AccelerateDecelerateInterpolator;
+import android.view.animation.DecelerateInterpolator;
 import android.widget.*;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -25,8 +28,8 @@ import java.util.function.*;
 
 public final class Main extends Activity {
   static final int THUMB_MIN_DP = 76, THUMB_MAX_DP = 220, THUMB_DEFAULT_DP = 133;
-  static final int SORT_TITLE = 0, SORT_RECENT = 1, SORT_ADDED = 2, SORT_RATING = 3;
-  static final String[] SORT_NAMES = {"제목순", "최근 읽은순", "최근 추가순", "별점순"};
+  static final int SORT_TITLE = 0, SORT_RECENT = 1, SORT_ADDED = 2, SORT_CUSTOM = 3;
+  static final String[] SORT_NAMES = {"제목순", "최근 읽은순", "최근 추가순", "사용자 정의"};
   AppUpdates updates;
   Library db;
   SharedPreferences prefs;
@@ -59,9 +62,10 @@ public final class Main extends Activity {
   boolean starSpansDark;
   boolean starSpansReady;
   Runnable pendingThumbResize;
+  ShelfDragController dragController;
   String selected = "", shelf = "", query = "", scanMessage = "";
   int filter, requestId, gridIndex, gridOffset, volumeIndex, volumeOffset;
-  boolean busy, loadingBook, dark, readerImmersive;
+  boolean busy, loadingBook, dark, readerImmersive, arrangeMode;
   int bg, ink, muted, surface, accent;
 
   static final class SeriesEntry {
@@ -74,6 +78,7 @@ public final class Main extends Activity {
     final String subtitleWithStar;
     final String subtitleNoStar;
     final int rating;
+    int customOrder;
     final long maxOpened;
     final long maxId;
     final boolean hasFav, hasReading, hasDone;
@@ -84,7 +89,7 @@ public final class Main extends Activity {
       this.books = books;
       Library.Book first = books.get(0);
       Library.Book foundRep = first;
-      int maxRating = 0;
+      int maxRating = 0, maxCustom = 0;
       long opened = 0, added = 0;
       boolean fav = false, reading = false, done = false;
       Set<String> sh = null;
@@ -93,6 +98,7 @@ public final class Main extends Activity {
         Library.Book b = books.get(i);
         if (b.rep) foundRep = b;
         if (b.rating > maxRating) maxRating = b.rating;
+        if (b.customOrder > maxCustom) maxCustom = b.customOrder;
         if (b.opened > opened) opened = b.opened;
         if (b.id > added) added = b.id;
         if (b.fav) fav = true;
@@ -114,6 +120,7 @@ public final class Main extends Activity {
       blob.append(this.displayTitle);
       this.searchBlob = blob.toString().toLowerCase(Locale.ROOT);
       this.rating = Math.max(0, Math.min(5, maxRating));
+      this.customOrder = maxCustom;
       this.maxOpened = opened;
       this.maxId = added;
       this.hasFav = fav;
@@ -158,13 +165,16 @@ public final class Main extends Activity {
 
   void ensureSortDefaults() {
     if (prefs == null) return;
-    if (prefs.getInt("sortDefaultVersion", 0) < 1) {
-      prefs
-          .edit()
-          .putInt("sort", SORT_RATING)
-          .putBoolean("sortDesc", true)
-          .putInt("sortDefaultVersion", 1)
-          .apply();
+    int ver = prefs.getInt("sortDefaultVersion", 0);
+    if (ver < 2) {
+      SharedPreferences.Editor ed = prefs.edit();
+      if (!prefs.contains("groupByRating")) ed.putBoolean("groupByRating", true);
+      int prevSort = prefs.getInt("sort", SORT_TITLE);
+      if (ver == 0 || prevSort == 3) {
+        // v1.0.15~16에서 3은 별점순이었으므로 별점순 표시하기(ON) + 제목순 ↑로 자연 전환
+        ed.putInt("sort", SORT_TITLE).putBoolean("sortDesc", false);
+      }
+      ed.putInt("sortDefaultVersion", 2).apply();
     }
   }
 
@@ -376,19 +386,24 @@ public final class Main extends Activity {
     }
   }
 
+  boolean groupByRating() {
+    ensureSortDefaults();
+    return prefs.getBoolean("groupByRating", true);
+  }
+
   int currentSort() {
     ensureSortDefaults();
-    int s = prefs.getInt("sort", SORT_RATING);
-    return s >= 0 && s < SORT_NAMES.length ? s : SORT_RATING;
+    int s = prefs.getInt("sort", SORT_TITLE);
+    return s >= 0 && s < SORT_NAMES.length ? s : SORT_TITLE;
   }
 
   boolean currentSortDesc() {
     ensureSortDefaults();
-    return prefs.getBoolean("sortDesc", true);
+    return prefs.getBoolean("sortDesc", false);
   }
 
   String sortLabel(int sort, boolean desc) {
-    int idx = sort >= 0 && sort < SORT_NAMES.length ? sort : SORT_RATING;
+    int idx = sort >= 0 && sort < SORT_NAMES.length ? sort : SORT_TITLE;
     return SORT_NAMES[idx] + " " + (desc ? "↓" : "↑");
   }
 
@@ -527,36 +542,87 @@ public final class Main extends Activity {
   void pickSort() {
     int current = currentSort();
     boolean desc = currentSortDesc();
-    String[] items = new String[SORT_NAMES.length];
+    boolean byRating = groupByRating();
+    AlertDialog.Builder builder = dialog();
+    LinearLayout box = col();
+    pad(box, 20, 6);
+
+    Switch ratingToggle = new Switch(builder.getContext());
+    ratingToggle.setText("별점순 표시하기");
+    ratingToggle.setTextSize(15);
+    ratingToggle.setTextColor(ink);
+    ratingToggle.setMinHeight(dp(48));
+    ratingToggle.setSwitchPadding(dp(10));
+    ratingToggle.setChecked(byRating);
+    box.addView(ratingToggle, -1, -2);
+
+    View divider = new View(this);
+    divider.setBackgroundColor(surface);
+    LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, dp(1));
+    dlp.setMargins(0, dp(4), 0, dp(6));
+    box.addView(divider, dlp);
+
+    TextView sortHeader = label("정렬 기준  ·  " + sortLabel(current, desc), 13, muted, true);
+    pad(sortHeader, 0, 4);
+    box.addView(sortHeader);
+
+    RadioGroup group = new RadioGroup(builder.getContext());
+    box.addView(group, -1, -2);
+    final RadioButton[] buttons = new RadioButton[SORT_NAMES.length];
+    final int[] activeSort = {current};
+    final boolean[] activeDesc = {desc};
     for (int i = 0; i < SORT_NAMES.length; i++) {
-      boolean itemDesc = i == current ? desc : (i != SORT_TITLE);
-      String arrow = itemDesc ? "↓" : "↑";
-      items[i] =
+      final int idx = i;
+      boolean itemDesc = i == current ? desc : (i == SORT_RECENT || i == SORT_ADDED);
+      RadioButton rb = new RadioButton(builder.getContext());
+      rb.setId(View.generateViewId());
+      rb.setTextColor(ink);
+      rb.setTextSize(15);
+      rb.setMinHeight(dp(46));
+      rb.setText(
           i == current
-              ? SORT_NAMES[i] + "  " + arrow + "  (현재 · 다시 누르면 전환)"
-              : SORT_NAMES[i] + "  " + arrow;
+              ? SORT_NAMES[i] + "  " + (itemDesc ? "↓" : "↑") + "  (현재 · 다시 누르면 전환)"
+              : SORT_NAMES[i] + "  " + (itemDesc ? "↓" : "↑"));
+      group.addView(rb, -1, -2);
+      buttons[i] = rb;
+      if (i == current) group.check(rb.getId());
     }
-    dialog()
-        .setTitle("정렬  ·  " + sortLabel(current, desc))
-        .setSingleChoiceItems(
-            items,
-            current,
-            (d, i) -> {
-              boolean nextDesc = i == current ? !desc : (i != SORT_TITLE);
-              prefs.edit().putInt("sort", i).putBoolean("sortDesc", nextDesc).apply();
-              gridIndex = gridOffset = 0;
-              d.dismiss();
-              renderNow(false);
-            })
-        .setNeutralButton(
-            desc ? "오름차순 ↑" : "내림차순 ↓",
-            (d, w) -> {
-              prefs.edit().putBoolean("sortDesc", !desc).apply();
-              gridIndex = gridOffset = 0;
-              renderNow(false);
-            })
-        .setNegativeButton("닫기", null)
-        .show();
+
+    AlertDialog dlg =
+        builder
+            .setTitle("정렬 및 표시")
+            .setView(box)
+            .setNeutralButton(
+                desc ? "오름차순 ↑" : "내림차순 ↓",
+                (d, w) -> {
+                  prefs.edit().putBoolean("sortDesc", !activeDesc[0]).apply();
+                  gridIndex = gridOffset = 0;
+                  renderNow(false);
+                })
+            .setNegativeButton("닫기", null)
+            .create();
+
+    ratingToggle.setOnCheckedChangeListener(
+        (v, on) -> {
+          prefs.edit().putBoolean("groupByRating", on).apply();
+          gridIndex = gridOffset = 0;
+          renderNow(false);
+        });
+
+    for (int i = 0; i < buttons.length; i++) {
+      final int idx = i;
+      buttons[i].setOnClickListener(
+          v -> {
+            boolean nextDesc =
+                idx == activeSort[0] ? !activeDesc[0] : (idx == SORT_RECENT || idx == SORT_ADDED);
+            if (idx != SORT_CUSTOM) arrangeMode = false;
+            prefs.edit().putInt("sort", idx).putBoolean("sortDesc", nextDesc).apply();
+            gridIndex = gridOffset = 0;
+            dlg.dismiss();
+            renderNow(false);
+          });
+    }
+    dlg.show();
   }
 
   final ExecutorService snapshots = Executors.newSingleThreadExecutor();
@@ -640,14 +706,19 @@ public final class Main extends Activity {
   }
 
   void renderLibrary() {
+    if (dragController != null) {
+      dragController.cancel();
+      dragController = null;
+    }
     grid = null;
     shelfList = null;
     sectionAdapter = null;
     scanBanner = null;
     theme();
     ensureEntries();
-    frame.removeAllViews();
     if (!groups.containsKey(selected)) selected = "";
+    if (!selected.isEmpty() || currentSort() != SORT_CUSTOM) arrangeMode = false;
+    frame.removeAllViews();
     root = col();
     ViewCompat.setOnApplyWindowInsetsListener(
         root,
@@ -701,9 +772,14 @@ public final class Main extends Activity {
         tabs.addView(tab);
       }
     }
+    boolean showArrange = showFilters && currentSort() == SORT_CUSTOM;
     tabs.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
     int available =
-        dp(getResources().getConfiguration().screenWidthDp - 16 - (showFilters ? 0 : 44))
+        dp(
+                getResources().getConfiguration().screenWidthDp
+                    - 16
+                    - (showFilters ? 0 : 44)
+                    - (showArrange ? 44 : 0))
             - tabs.getMeasuredWidth();
     boolean showSearch = available >= dp(176), showAdd = available >= dp(132);
     if (showSearch) icon(bar, "search", "책 검색", ink, this::searchLibrary);
@@ -716,6 +792,21 @@ public final class Main extends Activity {
           "정렬 · " + sortLabel(curSort, curDesc),
           ink,
           this::pickSort);
+    }
+    if (showArrange) {
+      ToolsIcon arrBtn =
+          new ToolsIcon(
+              this,
+              arrangeMode ? "check" : "arrange",
+              arrangeMode ? bg : ink,
+              arrangeMode ? "배치 완료" : "배치 모드");
+      if (arrangeMode) arrBtn.setBackground(shape(accent, 22));
+      bar.addView(arrBtn, dp(44), dp(48));
+      arrBtn.setOnClickListener(
+          w -> {
+            arrangeMode = !arrangeMode;
+            renderNow(true);
+          });
     }
     if (showAdd) icon(bar, "add", "책 추가", ink, this::addMenu);
     icon(
@@ -748,9 +839,17 @@ public final class Main extends Activity {
                 }
               });
         });
-    scanBanner = label(scanMessage, 13, accent, true);
+    String bannerText =
+        !scanMessage.isEmpty()
+            ? scanMessage
+            : (arrangeMode
+                ? (groupByRating()
+                    ? "배치 모드 · 작품을 꾹 눌러 같은 별점 내에서 드래그하세요"
+                    : "배치 모드 · 작품을 꾹 눌러 원하는 위치로 드래그하세요")
+                : "");
+    scanBanner = label(bannerText, 13, accent, true);
     pad(scanBanner, 20, 6);
-    scanBanner.setVisibility(scanMessage.isEmpty() ? View.GONE : View.VISIBLE);
+    scanBanner.setVisibility(bannerText.isEmpty() ? View.GONE : View.VISIBLE);
     root.addView(scanBanner);
     LinearLayout body = row();
     body.setGravity(Gravity.TOP);
@@ -761,6 +860,7 @@ public final class Main extends Activity {
     pull.addView(pane, -1, -1);
     pull.setColorSchemeColors(accent);
     pull.setProgressBackgroundColorSchemeColor(surface);
+    pull.setEnabled(!arrangeMode);
     pull.setOnChildScrollUpCallback(
         (parent, child) ->
             (grid != null && grid.canScrollVertically(-1))
@@ -855,16 +955,19 @@ public final class Main extends Activity {
     }
     int sort = currentSort();
     boolean desc = currentSortDesc();
+    boolean byRating = groupByRating();
     list.sort(
         (a, b) -> {
           int n;
           if (sort == SORT_TITLE) {
             n = Order.natural(a.displayTitle, b.displayTitle);
             return desc ? -n : n;
-          } else if (sort == SORT_RATING) {
-            n = Integer.compare(a.rating, b.rating);
-            if (desc) n = -n;
-            return n == 0 ? Order.natural(a.displayTitle, b.displayTitle) : n;
+          } else if (sort == SORT_CUSTOM) {
+            int oa = a.customOrder > 0 ? a.customOrder : Integer.MAX_VALUE;
+            int ob = b.customOrder > 0 ? b.customOrder : Integer.MAX_VALUE;
+            n = Integer.compare(oa, ob);
+            if (n == 0) n = Order.natural(a.displayTitle, b.displayTitle);
+            return desc ? -n : n;
           } else {
             long oa = sort == SORT_RECENT ? a.maxOpened : a.maxId;
             long ob = sort == SORT_RECENT ? b.maxOpened : b.maxId;
@@ -890,7 +993,7 @@ public final class Main extends Activity {
       }
       return;
     }
-    if (sort == SORT_RATING) {
+    if (byRating) {
       @SuppressWarnings("unchecked")
       List<CoverItem>[] buckets = new List[6];
       for (int i = 0; i < list.size(); i++) {
@@ -899,19 +1002,24 @@ public final class Main extends Activity {
         buckets[e.rating].add(new CoverItem(e.rep, e.displayTitle, e.subtitleNoStar));
       }
       List<StarSection> sections = new ArrayList<>(6);
-      int start = desc ? 5 : 0, end = desc ? -1 : 6, step = desc ? -1 : 1;
-      for (int r = start; r != end; r += step) {
+      for (int r = 5; r >= 0; r--) {
         if (buckets[r] != null && !buckets[r].isEmpty()) {
           sections.add(new StarSection(r, buckets[r]));
         }
       }
-      starSectionList(pane, sections);
+      starSectionList(pane, sections, true);
       return;
     }
     List<CoverItem> covers = new ArrayList<>(list.size());
     for (int i = 0; i < list.size(); i++) {
       SeriesEntry e = list.get(i);
       covers.add(new CoverItem(e.rep, e.displayTitle, e.subtitleWithStar));
+    }
+    if (sort == SORT_CUSTOM) {
+      List<StarSection> flat = new ArrayList<>(1);
+      flat.add(new StarSection(-1, covers));
+      starSectionList(pane, flat, false);
+      return;
     }
     coverGrid(pane, covers, false);
   }
@@ -939,18 +1047,22 @@ public final class Main extends Activity {
 
   static final class SectionRow {
     final boolean header;
-    final int rating, count;
+    final int rating, count, secIndex, startItemIndex;
     final List<CoverItem> items;
 
-    SectionRow(int rating, int count) {
+    SectionRow(int secIndex, int rating, int count) {
       this.header = true;
+      this.secIndex = secIndex;
+      this.startItemIndex = -1;
       this.rating = rating;
       this.count = count;
       this.items = Collections.emptyList();
     }
 
-    SectionRow(List<CoverItem> items) {
+    SectionRow(int secIndex, int startItemIndex, List<CoverItem> items) {
       this.header = false;
+      this.secIndex = secIndex;
+      this.startItemIndex = startItemIndex;
       this.rating = -1;
       this.count = items.size();
       this.items = items;
@@ -962,6 +1074,8 @@ public final class Main extends Activity {
     final ImageView img;
     final TextView name, sub;
     CoverItem item;
+    int secIndex = -1, itemIndex = -1;
+    ObjectAnimator wiggle;
 
     TileHolder(LinearLayout root, ImageView img, TextView name, TextView sub) {
       this.root = root;
@@ -969,10 +1083,112 @@ public final class Main extends Activity {
       this.name = name;
       this.sub = sub;
     }
+
+    void stopWiggle() {
+      if (wiggle != null) {
+        wiggle.cancel();
+        wiggle = null;
+      }
+      if (root.getRotation() != 0f) root.setRotation(0f);
+    }
+
+    void syncWiggle(boolean active, long seed) {
+      if (!active) {
+        stopWiggle();
+        return;
+      }
+      if (wiggle != null && wiggle.isRunning()) return;
+      stopWiggle();
+      float deg = (seed % 2 == 0) ? 1.55f : -1.55f;
+      wiggle = ObjectAnimator.ofFloat(root, View.ROTATION, -deg, deg);
+      wiggle.setDuration(130 + (Math.abs(seed) % 35));
+      wiggle.setRepeatCount(ValueAnimator.INFINITE);
+      wiggle.setRepeatMode(ValueAnimator.REVERSE);
+      wiggle.setInterpolator(new AccelerateDecelerateInterpolator());
+      wiggle.setStartDelay(Math.abs(seed * 29) % 110);
+      wiggle.start();
+    }
+  }
+
+  /**
+   * 사용자 정의 정렬에서 작품을 드래그해 순서를 바꾼다.
+   * 별점순 표시하기가 켜져 있으면 같은 별점 섹션 안에서만 이동할 수 있다.
+   */
+  boolean reorderCustomSection(int fromSec, int fromIdx, int toSec, int toIdx) {
+    if (sectionAdapter == null) return false;
+    if (fromSec != toSec) return false;
+    if (fromSec < 0 || fromSec >= sectionAdapter.sections.size()) return false;
+    StarSection sec = sectionAdapter.sections.get(fromSec);
+    if (fromIdx < 0
+        || fromIdx >= sec.items.size()
+        || toIdx < 0
+        || toIdx >= sec.items.size()
+        || fromIdx == toIdx) return false;
+    CoverItem moved = sec.items.remove(fromIdx);
+    sec.items.add(toIdx, moved);
+    persistSectionCustomOrder(sec);
+    sectionAdapter.rebuildRowsOnly();
+    sectionAdapter.notifyDataSetChanged();
+    return true;
+  }
+
+  void persistSectionCustomOrder(StarSection sec) {
+    // 아직 customOrder가 0인 작품이 있으면 전체 시리즈에 1..N 기본 슬롯을 먼저 부여한다.
+    List<SeriesEntry> all = new ArrayList<>(entries.values());
+    boolean needsInit = false;
+    for (int i = 0; i < all.size(); i++) {
+      if (all.get(i).customOrder <= 0) {
+        needsInit = true;
+        break;
+      }
+    }
+    Map<String, Integer> dbUpdates = new LinkedHashMap<>();
+    if (needsInit) {
+      all.sort(
+          (a, b) -> {
+            int oa = a.customOrder > 0 ? a.customOrder : Integer.MAX_VALUE;
+            int ob = b.customOrder > 0 ? b.customOrder : Integer.MAX_VALUE;
+            int d = Integer.compare(oa, ob);
+            return d == 0 ? Order.natural(a.displayTitle, b.displayTitle) : d;
+          });
+      for (int i = 0; i < all.size(); i++) {
+        SeriesEntry e = all.get(i);
+        int pos = i + 1;
+        if (e.customOrder != pos) {
+          e.customOrder = pos;
+          for (Library.Book b : e.books) b.customOrder = pos;
+          dbUpdates.put(e.grp, pos);
+        }
+      }
+    }
+    // 이 섹션이 보유한 슬롯 번호들만 새 시각 순서대로 재배정해 다른 별점 섹션의 순서를 보존한다.
+    int count = sec.items.size();
+    int[] slots = new int[count];
+    for (int i = 0; i < count; i++) {
+      SeriesEntry e = entries.get(sec.items.get(i).book.grp);
+      slots[i] = e != null && e.customOrder > 0 ? e.customOrder : (i + 1);
+    }
+    Arrays.sort(slots);
+    boolean desc = currentSortDesc();
+    for (int i = 0; i < count; i++) {
+      int assigned = desc ? slots[count - 1 - i] : slots[i];
+      String grp = sec.items.get(i).book.grp;
+      SeriesEntry e = entries.get(grp);
+      if (e != null) {
+        e.customOrder = assigned;
+        for (Library.Book b : e.books) b.customOrder = assigned;
+      }
+      dbUpdates.put(grp, assigned);
+    }
+    if (!dbUpdates.isEmpty() && db != null) {
+      final Map<String, Integer> batch = new LinkedHashMap<>(dbUpdates);
+      worker.execute(() -> db.saveCustomOrders(batch));
+    }
   }
 
   final class StarSectionAdapter extends BaseAdapter {
     final List<StarSection> sections;
+    final boolean showHeaders;
     final List<SectionRow> rows = new ArrayList<>();
     final int padH = dp(18), padTop = dp(6), padBottom = dp(12), spacing = dp(14);
     int widthDp;
@@ -980,9 +1196,12 @@ public final class Main extends Activity {
     int cols = 3;
     int tileWidthPx;
     int coverHeightPx;
+    long draggedBookId = -1;
 
-    StarSectionAdapter(List<StarSection> sections, int widthDp, int availablePx) {
+    StarSectionAdapter(
+        List<StarSection> sections, boolean showHeaders, int widthDp, int availablePx) {
       this.sections = sections;
+      this.showHeaders = showHeaders;
       this.widthDp = widthDp;
       this.availablePx = availablePx;
       rebuild();
@@ -1012,12 +1231,18 @@ public final class Main extends Activity {
       cols = Math.max(1, (usable + spacing) / Math.max(1, desired + spacing));
       tileWidthPx = Math.max(dp(60), (usable - spacing * (cols - 1)) / cols);
       coverHeightPx = (int) (tileWidthPx * 1.42f);
+      rebuildRowsOnly();
+    }
+
+    void rebuildRowsOnly() {
       rows.clear();
       for (int s = 0; s < sections.size(); s++) {
         StarSection sec = sections.get(s);
-        rows.add(new SectionRow(sec.rating, sec.items.size()));
+        if (showHeaders) rows.add(new SectionRow(s, sec.rating, sec.items.size()));
         for (int i = 0; i < sec.items.size(); i += cols) {
-          rows.add(new SectionRow(sec.items.subList(i, Math.min(i + cols, sec.items.size()))));
+          rows.add(
+              new SectionRow(
+                  s, i, new ArrayList<>(sec.items.subList(i, Math.min(i + cols, sec.items.size())))));
         }
       }
     }
@@ -1083,9 +1308,12 @@ public final class Main extends Activity {
         rowView = row();
         rowView.setGravity(Gravity.TOP);
         rowView.setPadding(padH, padTop, padH, padBottom);
+        rowView.setClipChildren(false);
+        rowView.setClipToPadding(false);
         holders = null;
       }
       if (holders == null || holders.length != cols) {
+        if (holders != null) for (TileHolder old : holders) old.stopWiggle();
         rowView.removeAllViews();
         holders = new TileHolder[cols];
         for (int c = 0; c < cols; c++) {
@@ -1104,7 +1332,7 @@ public final class Main extends Activity {
           TileHolder h = new TileHolder(tile, img, name, sub);
           tile.setOnClickListener(
               v -> {
-                if (h.item == null) return;
+                if (arrangeMode || h.item == null) return;
                 remember();
                 volumeIndex = volumeOffset = 0;
                 selected = h.item.book.grp;
@@ -1112,7 +1340,7 @@ public final class Main extends Activity {
               });
           tile.setOnLongClickListener(
               v -> {
-                if (h.item == null) return false;
+                if (arrangeMode || h.item == null) return false;
                 manage(h.item.book);
                 return true;
               });
@@ -1128,7 +1356,11 @@ public final class Main extends Activity {
         if (c < rowData.items.size()) {
           CoverItem item = rowData.items.get(c);
           h.item = item;
+          h.secIndex = rowData.secIndex;
+          h.itemIndex = rowData.startItemIndex + c;
           if (h.root.getVisibility() != View.VISIBLE) h.root.setVisibility(View.VISIBLE);
+          h.root.setClickable(!arrangeMode);
+          h.root.setLongClickable(!arrangeMode);
           ViewGroup.LayoutParams lp = h.img.getLayoutParams();
           if (lp.height != coverHeightPx) {
             lp.height = coverHeightPx;
@@ -1137,8 +1369,14 @@ public final class Main extends Activity {
           loadCover(h.img, item.book);
           h.name.setText(item.title);
           h.sub.setText(item.subtitle);
+          boolean isDragged = arrangeMode && item.book.id == draggedBookId;
+          h.root.setAlpha(isDragged ? 0.16f : 1f);
+          h.syncWiggle(arrangeMode && !isDragged, item.book.id + c);
         } else {
           h.item = null;
+          h.secIndex = -1;
+          h.itemIndex = -1;
+          h.stopWiggle();
           if (h.root.getVisibility() != View.INVISIBLE) h.root.setVisibility(View.INVISIBLE);
         }
       }
@@ -1146,17 +1384,321 @@ public final class Main extends Activity {
     }
   }
 
-  void starSectionList(LinearLayout pane, List<StarSection> sections) {
+  /** 갤럭시 앱 서랍 스타일 꾹 눌러 드래그 배치 컨트롤러 (흔들림 + 부유 고스트 + 가장자리 자동 스크롤 + 슬라이드 스왑). */
+  final class ShelfDragController implements View.OnTouchListener {
+    final ListView listView;
+    final StarSectionAdapter adapter;
+    final int touchSlop = ViewConfiguration.get(Main.this).getScaledTouchSlop();
+    final DecelerateInterpolator decel = new DecelerateInterpolator();
+    final int[] loc = new int[2];
+    final int[] frameLoc = new int[2];
+    boolean dragging;
+    int dragSec = -1, dragIdx = -1;
+    long dragBookId = -1;
+    float downX, downY, downRawX, downRawY, lastRawX, lastRawY;
+    float ghostStartX, ghostStartY;
+    ImageView ghost;
+    Bitmap ghostBitmap;
+    Runnable longPressTask;
+    int autoScrollSpeed;
+    final Runnable autoScrollTask =
+        new Runnable() {
+          public void run() {
+            if (!dragging || autoScrollSpeed == 0) return;
+            listView.scrollListBy(autoScrollSpeed);
+            checkSwap(lastRawX, lastRawY);
+            handler.postDelayed(this, 16);
+          }
+        };
+
+    ShelfDragController(ListView listView, StarSectionAdapter adapter) {
+      this.listView = listView;
+      this.adapter = adapter;
+    }
+
+    TileHolder findTileAt(float rawX, float rawY) {
+      for (int i = 0; i < listView.getChildCount(); i++) {
+        View child = listView.getChildAt(i);
+        if (!(child.getTag() instanceof TileHolder[])) continue;
+        TileHolder[] holders = (TileHolder[]) child.getTag();
+        for (int c = 0; c < holders.length; c++) {
+          TileHolder h = holders[c];
+          if (h.item == null || h.root.getVisibility() != View.VISIBLE) continue;
+          h.root.getLocationOnScreen(loc);
+          if (rawX >= loc[0]
+              && rawX <= loc[0] + h.root.getWidth()
+              && rawY >= loc[1]
+              && rawY <= loc[1] + h.root.getHeight()) {
+            return h;
+          }
+        }
+      }
+      return null;
+    }
+
+    void startDrag(TileHolder hit) {
+      if (hit == null || hit.item == null || hit.root.getWidth() <= 0 || hit.root.getHeight() <= 0)
+        return;
+      dragging = true;
+      dragSec = hit.secIndex;
+      dragIdx = hit.itemIndex;
+      dragBookId = hit.item.book.id;
+      listView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+      hit.stopWiggle();
+      int w = hit.root.getWidth(), h = hit.root.getHeight();
+      ghostBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+      Canvas canvas = new Canvas(ghostBitmap);
+      hit.root.draw(canvas);
+      hit.root.getLocationOnScreen(loc);
+      frame.getLocationOnScreen(frameLoc);
+      ghostStartX = loc[0] - frameLoc[0];
+      ghostStartY = loc[1] - frameLoc[1];
+      ghost = new ImageView(Main.this);
+      ghost.setImageBitmap(ghostBitmap);
+      ghost.setElevation(dp(14));
+      ghost.setTranslationX(ghostStartX);
+      ghost.setTranslationY(ghostStartY);
+      frame.addView(ghost, new FrameLayout.LayoutParams(w, h, Gravity.TOP | Gravity.START));
+      ghost.animate().scaleX(1.07f).scaleY(1.07f).alpha(0.92f).setDuration(110).start();
+      adapter.draggedBookId = dragBookId;
+      hit.root.setAlpha(0.16f);
+      listView.requestDisallowInterceptTouchEvent(true);
+    }
+
+    void checkSwap(float rawX, float rawY) {
+      TileHolder target = findTileAt(rawX, rawY);
+      if (target == null || target.item == null) return;
+      // 별점순 표시하기 ON이면 각 별점이 별도 섹션이므로 같은 별점 섹션 안에서만 이동 허용
+      if (target.secIndex != dragSec) return;
+      if (target.itemIndex == dragIdx) return;
+
+      // 스왑 전 화면에 보이는 타일 좌표 기록 (부드러운 슬라이드 이동 애니메이션용)
+      Map<Long, float[]> oldPos = new HashMap<>();
+      for (int i = 0; i < listView.getChildCount(); i++) {
+        View child = listView.getChildAt(i);
+        if (!(child.getTag() instanceof TileHolder[])) continue;
+        for (TileHolder h : (TileHolder[]) child.getTag()) {
+          if (h.item == null || h.root.getVisibility() != View.VISIBLE) continue;
+          h.root.getLocationOnScreen(loc);
+          oldPos.put(h.item.book.id, new float[] {loc[0], loc[1]});
+        }
+      }
+
+      StarSection sec = adapter.sections.get(dragSec);
+      CoverItem moved = sec.items.remove(dragIdx);
+      sec.items.add(target.itemIndex, moved);
+      dragIdx = target.itemIndex;
+      adapter.rebuildRowsOnly();
+      adapter.notifyDataSetChanged();
+      listView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+
+      listView
+          .getViewTreeObserver()
+          .addOnPreDrawListener(
+              new ViewTreeObserver.OnPreDrawListener() {
+                public boolean onPreDraw() {
+                  listView.getViewTreeObserver().removeOnPreDrawListener(this);
+                  for (int i = 0; i < listView.getChildCount(); i++) {
+                    View child = listView.getChildAt(i);
+                    if (!(child.getTag() instanceof TileHolder[])) continue;
+                    for (TileHolder h : (TileHolder[]) child.getTag()) {
+                      if (h.item == null
+                          || h.item.book.id == dragBookId
+                          || h.root.getVisibility() != View.VISIBLE) continue;
+                      float[] prev = oldPos.get(h.item.book.id);
+                      if (prev == null) continue;
+                      h.root.getLocationOnScreen(loc);
+                      float dx = prev[0] - loc[0];
+                      float dy = prev[1] - loc[1];
+                      if (Math.abs(dx) > 1f || Math.abs(dy) > 1f) {
+                        h.root.setTranslationX(dx);
+                        h.root.setTranslationY(dy);
+                        h.root
+                            .animate()
+                            .translationX(0f)
+                            .translationY(0f)
+                            .setDuration(180)
+                            .setInterpolator(decel)
+                            .start();
+                      }
+                    }
+                  }
+                  return true;
+                }
+              });
+    }
+
+    void updateAutoScroll(float rawY) {
+      listView.getLocationOnScreen(loc);
+      float yInList = rawY - loc[1];
+      int edge = dp(68);
+      int nextSpeed = 0;
+      if (yInList < edge) {
+        float ratio = Math.max(0.2f, 1f - Math.max(0f, yInList) / edge);
+        nextSpeed = -Math.round(dp(11) * ratio);
+      } else if (yInList > listView.getHeight() - edge) {
+        float ratio =
+            Math.max(0.2f, 1f - Math.max(0f, listView.getHeight() - yInList) / edge);
+        nextSpeed = Math.round(dp(11) * ratio);
+      }
+      boolean wasScrolling = autoScrollSpeed != 0;
+      autoScrollSpeed = nextSpeed;
+      if (nextSpeed != 0 && !wasScrolling) {
+        handler.postDelayed(autoScrollTask, 16);
+      } else if (nextSpeed == 0 && wasScrolling) {
+        handler.removeCallbacks(autoScrollTask);
+      }
+    }
+
+    void finishDrag() {
+      cancelPending();
+      if (!dragging) return;
+      dragging = false;
+      if (dragSec >= 0 && dragSec < adapter.sections.size()) {
+        persistSectionCustomOrder(adapter.sections.get(dragSec));
+      }
+      final ImageView dropping = ghost;
+      final Bitmap bmp = ghostBitmap;
+      ghost = null;
+      ghostBitmap = null;
+      TileHolder dest = null;
+      for (int i = 0; i < listView.getChildCount(); i++) {
+        View child = listView.getChildAt(i);
+        if (!(child.getTag() instanceof TileHolder[])) continue;
+        for (TileHolder h : (TileHolder[]) child.getTag()) {
+          if (h.item != null && h.item.book.id == dragBookId) {
+            dest = h;
+            break;
+          }
+        }
+      }
+      if (dropping != null && dest != null) {
+        dest.root.getLocationOnScreen(loc);
+        frame.getLocationOnScreen(frameLoc);
+        float tx = loc[0] - frameLoc[0];
+        float ty = loc[1] - frameLoc[1];
+        dropping
+            .animate()
+            .translationX(tx)
+            .translationY(ty)
+            .scaleX(1f)
+            .scaleY(1f)
+            .alpha(1f)
+            .setDuration(140)
+            .setInterpolator(decel)
+            .withEndAction(
+                () -> {
+                  frame.removeView(dropping);
+                  if (bmp != null) bmp.recycle();
+                  adapter.draggedBookId = -1;
+                  adapter.notifyDataSetChanged();
+                })
+            .start();
+      } else {
+        if (dropping != null) frame.removeView(dropping);
+        if (bmp != null) bmp.recycle();
+        adapter.draggedBookId = -1;
+        adapter.notifyDataSetChanged();
+      }
+      dragSec = dragIdx = -1;
+      dragBookId = -1;
+    }
+
+    void cancelPending() {
+      if (longPressTask != null) {
+        handler.removeCallbacks(longPressTask);
+        longPressTask = null;
+      }
+      autoScrollSpeed = 0;
+      handler.removeCallbacks(autoScrollTask);
+    }
+
+    void cancel() {
+      cancelPending();
+      dragging = false;
+      if (ghost != null) {
+        ghost.animate().cancel();
+        frame.removeView(ghost);
+        ghost = null;
+      }
+      if (ghostBitmap != null) {
+        ghostBitmap.recycle();
+        ghostBitmap = null;
+      }
+      adapter.draggedBookId = -1;
+      for (int i = 0; i < listView.getChildCount(); i++) {
+        View child = listView.getChildAt(i);
+        if (child.getTag() instanceof TileHolder[]) {
+          for (TileHolder h : (TileHolder[]) child.getTag()) h.stopWiggle();
+        }
+      }
+    }
+
+    public boolean onTouch(View v, MotionEvent e) {
+      int action = e.getActionMasked();
+      switch (action) {
+        case MotionEvent.ACTION_DOWN:
+          cancelPending();
+          downX = e.getX();
+          downY = e.getY();
+          downRawX = lastRawX = e.getRawX();
+          downRawY = lastRawY = e.getRawY();
+          final TileHolder hit = findTileAt(downRawX, downRawY);
+          if (hit != null) {
+            longPressTask =
+                () -> {
+                  longPressTask = null;
+                  if (arrangeMode && !isDestroyed()) startDrag(hit);
+                };
+            handler.postDelayed(longPressTask, 200);
+          }
+          return false;
+        case MotionEvent.ACTION_MOVE:
+          lastRawX = e.getRawX();
+          lastRawY = e.getRawY();
+          if (!dragging) {
+            if (longPressTask != null
+                && Math.hypot(e.getX() - downX, e.getY() - downY) > touchSlop) {
+              cancelPending();
+            }
+            return false;
+          }
+          if (ghost != null) {
+            ghost.setTranslationX(ghostStartX + (lastRawX - downRawX));
+            ghost.setTranslationY(ghostStartY + (lastRawY - downRawY));
+          }
+          updateAutoScroll(lastRawY);
+          checkSwap(lastRawX, lastRawY);
+          return true;
+        case MotionEvent.ACTION_UP:
+        case MotionEvent.ACTION_CANCEL:
+          if (dragging) {
+            finishDrag();
+            return true;
+          }
+          cancelPending();
+          return false;
+      }
+      return false;
+    }
+  }
+
+  void starSectionList(LinearLayout pane, List<StarSection> sections, boolean showHeaders) {
     shelfList = new ListView(this);
     shelfList.setTag(false);
     shelfList.setDivider(null);
     shelfList.setDividerHeight(0);
     shelfList.setSelector(new ColorDrawable(Color.TRANSPARENT));
     shelfList.setClipToPadding(false);
+    shelfList.setClipChildren(false);
     shelfList.setPadding(0, dp(2), 0, dp(22));
     int initialWidth = dp(getResources().getConfiguration().screenWidthDp);
-    sectionAdapter = new StarSectionAdapter(sections, coverWidthDp(), initialWidth);
+    sectionAdapter = new StarSectionAdapter(sections, showHeaders, coverWidthDp(), initialWidth);
     shelfList.setAdapter(sectionAdapter);
+    if (arrangeMode) {
+      dragController = new ShelfDragController(shelfList, sectionAdapter);
+      shelfList.setOnTouchListener(dragController);
+    }
     final ListView listView = shelfList;
     final StarSectionAdapter adapter = sectionAdapter;
     listView.addOnLayoutChangeListener(
@@ -1483,6 +2025,7 @@ public final class Main extends Activity {
           "연결 폴더 다시 읽기",
           "책장 관리",
           "표지 크기 · " + coverWidthDp() + "dp",
+          "별점순 표시하기 · " + (groupByRating() ? "켜짐" : "꺼짐"),
           "화면 테마",
           "임시 파일 정리",
           "앱 업데이트 확인",
@@ -1492,16 +2035,23 @@ public final class Main extends Activity {
           if (i == 0) refreshSources(false);
           if (i == 1) shelves();
           if (i == 2) showThumbSizeSlider();
-          if (i == 3)
+          if (i == 3) {
+            boolean next = !groupByRating();
+            prefs.edit().putBoolean("groupByRating", next).apply();
+            gridIndex = gridOffset = 0;
+            renderNow(false);
+            toast(next ? "별점순으로 구분해 표시합니다." : "별점 구분 없이 전체 목록으로 표시합니다.");
+          }
+          if (i == 4)
             pick("화면 테마", "theme", new String[] {"기기 설정", "밝게", "어둡게"}, () -> renderNow(true));
-          if (i == 5) updates.check(true);
-          if (i == 6) {
+          if (i == 6) updates.check(true);
+          if (i == 7) {
             boolean hide = !prefs.getBoolean("hideVolumeTags", true);
             prefs.edit().putBoolean("hideVolumeTags", hide).apply();
             renderNow(true);
             toast(hide ? "앞뒤 [문구]와 파일 표기를 숨깁니다." : "파일 이름을 그대로 표시합니다.");
           }
-          if (i == 4) {
+          if (i == 5) {
             worker.execute(
                 () -> {
                   Archive.clearSpools(this);
@@ -2131,7 +2681,8 @@ public final class Main extends Activity {
                 + "  "
                 + works
                 + "  ·  "
-                + sortLabel(currentSort(), currentSortDesc()),
+                + sortLabel(currentSort(), currentSortDesc())
+                + (groupByRating() ? "  ·  ★별점" : ""),
             14,
             muted,
             true);
@@ -2284,6 +2835,11 @@ public final class Main extends Activity {
       updateScanBanner();
       return;
     }
+    if (arrangeMode) {
+      arrangeMode = false;
+      renderNow(true);
+      return;
+    }
     if (!selected.isEmpty()) {
       selected = "";
       renderNow(false);
@@ -2298,6 +2854,7 @@ public final class Main extends Activity {
   }
 
   protected void onDestroy() {
+    if (dragController != null) dragController.cancel();
     if (reader != null) reader.close();
     handler.removeCallbacks(refresh);
     if (pendingThumbResize != null) handler.removeCallbacks(pendingThumbResize);
