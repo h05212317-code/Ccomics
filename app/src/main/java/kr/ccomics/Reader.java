@@ -27,8 +27,10 @@ final class Reader extends View {
   final GestureDetector immediateTaps, centerDoubleTaps;
   GestureDetector activeTaps;
   boolean doubleZoom, pinchZoom, tapTurn, swipeTurn, brightnessGesture;
+  static final float TAP_MIN_EDGE = 0.05f;
+  static final float TAP_MIN_CENTER = 0.08f;
   boolean brightnessDrag, skipTouch, tapStartedTurn;
-  float edge, initialBrightness;
+  float tapLeft = 0.33f, tapRight = 0.67f, initialBrightness;
   final float previousWindowBrightness;
   final ScaleGestureDetector pinch;
   final OverScroller fling;
@@ -154,14 +156,33 @@ final class Reader extends View {
     pinch.setStylusScaleEnabled(false);
   }
 
+  static float[] clampTapZones(float left, float right) {
+    float l = Math.max(TAP_MIN_EDGE, Math.min(1f - TAP_MIN_EDGE - TAP_MIN_CENTER, left));
+    float r = Math.max(TAP_MIN_EDGE + TAP_MIN_CENTER, Math.min(1f - TAP_MIN_EDGE, right));
+    if (r - l < TAP_MIN_CENTER) {
+      float mid = (l + r) * 0.5f;
+      l = Math.max(TAP_MIN_EDGE, Math.min(1f - TAP_MIN_EDGE - TAP_MIN_CENTER, mid - TAP_MIN_CENTER * 0.5f));
+      r = l + TAP_MIN_CENTER;
+    }
+    return new float[] {l, r};
+  }
+
+  boolean inLeftZone(float x) {
+    return x < getWidth() * tapLeft;
+  }
+
+  boolean inRightZone(float x) {
+    return x > getWidth() * tapRight;
+  }
+
   boolean center(float x) {
-    return x >= getWidth() * edge && x <= getWidth() * (1 - edge);
+    return !inLeftZone(x) && !inRightZone(x);
   }
 
   boolean handleTap(MotionEvent e) {
     if (closed || pinched || drag || brightnessDrag) return false;
     if (mode == 3 || center(e.getX()) || !tapTurn) host.toggleReaderMenu();
-    else animateTurn((e.getX() < getWidth() / 2f) == rtl ? 1 : -1);
+    else animateTurn(inLeftZone(e.getX()) == rtl ? 1 : -1);
     return true;
   }
 
@@ -172,7 +193,14 @@ final class Reader extends View {
     swipeTurn = host.prefs.getBoolean("swipeTurn", true);
     tapEffect = host.prefs.getInt("tapEffect", 2);
     brightnessGesture = host.prefs.getBoolean("brightnessGesture", false);
-    edge = new float[] {.25f, .33f, .4f}[host.prefs.getInt("tapWidth", 1)];
+    int legacyIdx = Math.max(0, Math.min(2, host.prefs.getInt("tapWidth", 1)));
+    float fallbackEdge = new float[] {.25f, .33f, .4f}[legacyIdx];
+    float rawLeft = host.prefs.contains("tapLeft") ? host.prefs.getFloat("tapLeft", fallbackEdge) : fallbackEdge;
+    float rawRight =
+        host.prefs.contains("tapRight") ? host.prefs.getFloat("tapRight", 1f - fallbackEdge) : (1f - fallbackEdge);
+    float[] clamped = clampTapZones(rawLeft, rawRight);
+    tapLeft = clamped[0];
+    tapRight = clamped[1];
     if (!pinchZoom && !doubleZoom && zoom > 1) {
       resetZoom();
       invalidate();

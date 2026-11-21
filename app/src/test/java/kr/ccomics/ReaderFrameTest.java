@@ -626,4 +626,100 @@ public class ReaderFrameTest {
     decode(5);
     assertVisible(4);
   }
+
+  @Test
+  public void touchZoneOverlayDragsBoundariesSavesAndAppliesAsymmetricTapZones() {
+    host.reader = reader;
+    host.frame = new android.widget.FrameLayout(host);
+    host.frame.addView(reader, -1, -1);
+    int w = host.dp(360), h = host.dp(720);
+    host.frame.measure(
+        android.view.View.MeasureSpec.makeMeasureSpec(w, android.view.View.MeasureSpec.EXACTLY),
+        android.view.View.MeasureSpec.makeMeasureSpec(h, android.view.View.MeasureSpec.EXACTLY));
+    host.frame.layout(0, 0, w, h);
+
+    // 메뉴가 열려 있는 상태에서 터치 범위 설정을 열면 메뉴는 닫히고 전체 화면 오버레이가 뜬다.
+    host.toggleReaderMenu();
+    assertNotNull(host.overlay);
+    host.openTouchZoneEditor();
+    assertNull(host.overlay);
+    assertNotNull(host.touchZoneOverlay);
+
+    TouchZoneOverlay tz = host.touchZoneOverlay;
+    tz.measure(
+        android.view.View.MeasureSpec.makeMeasureSpec(w, android.view.View.MeasureSpec.EXACTLY),
+        android.view.View.MeasureSpec.makeMeasureSpec(h, android.view.View.MeasureSpec.EXACTLY));
+    tz.layout(0, 0, w, h);
+
+    // 실제 캔버스 그리기가 예외 없이 동작해야 한다.
+    Bitmap preview = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+    tz.draw(new Canvas(preview));
+    preview.recycle();
+
+    long t = android.os.SystemClock.uptimeMillis();
+    float midY = h * 0.45f;
+
+    // 1. 왼쪽 경계(0.33)를 오른쪽(0.58)으로 드래그 (가운데 50%를 넘어 비대칭 배치)
+    float startL = w * tz.left;
+    float targetL = w * 0.58f;
+    android.view.MotionEvent d1 = android.view.MotionEvent.obtain(t, t, 0, startL, midY, 0);
+    android.view.MotionEvent m1 = android.view.MotionEvent.obtain(t, t + 20, 2, targetL, midY, 0);
+    android.view.MotionEvent u1 = android.view.MotionEvent.obtain(t, t + 40, 1, targetL, midY, 0);
+    tz.canvas.onTouchEvent(d1);
+    tz.canvas.onTouchEvent(m1);
+    tz.canvas.onTouchEvent(u1);
+    d1.recycle();
+    m1.recycle();
+    u1.recycle();
+    assertEquals(0.58f, tz.left, 0.02f);
+
+    // 2. 오른쪽 경계(0.67)를 0.80으로 드래그
+    float startR = w * tz.right;
+    float targetR = w * 0.80f;
+    android.view.MotionEvent d2 = android.view.MotionEvent.obtain(t + 50, t + 50, 0, startR, midY, 0);
+    android.view.MotionEvent m2 = android.view.MotionEvent.obtain(t + 50, t + 70, 2, targetR, midY, 0);
+    android.view.MotionEvent u2 = android.view.MotionEvent.obtain(t + 50, t + 90, 1, targetR, midY, 0);
+    tz.canvas.onTouchEvent(d2);
+    tz.canvas.onTouchEvent(m2);
+    tz.canvas.onTouchEvent(u2);
+    d2.recycle();
+    m2.recycle();
+    u2.recycle();
+    assertEquals(0.80f, tz.right, 0.02f);
+
+    // 3. 저장 버튼 실행 → prefs와 reader에 반영되고 오버레이가 닫힌다.
+    tz.listener.onSave(tz.left, tz.right);
+    assertNull(host.touchZoneOverlay);
+    assertEquals(0.58f, reader.tapLeft, 0.02f);
+    assertEquals(0.80f, reader.tapRight, 0.02f);
+
+    // 4. 비대칭 영역 실제 탭 동작 검증 (rtl=true, width=w):
+    //    55% 위치는 화면 중앙 오른쪽이지만 tapLeft(58%) 안쪽이므로 '왼쪽 영역(다음 페이지)'으로 동작해야 한다.
+    reader.mode = 1;
+    reader.rtl = true;
+    reader.effect = 2;
+    reader.tapEffect = 2;
+    reader.layout(0, 0, w, h);
+    draw();
+    decode(0);
+    decode(1);
+    assertEquals(0, reader.page);
+    tap(t + 200, w * 0.55f);
+    assertEquals(1, reader.page);
+    // 68% 위치는 가운데 메뉴 영역 → 메뉴 토글, 페이지 유지
+    tap(t + 260, w * 0.68f);
+    assertEquals(1, reader.page);
+    assertNotNull(host.overlay);
+    host.toggleReaderMenu();
+    // 90% 위치는 오른쪽 영역 → 이전 페이지(0쪽)
+    tap(t + 320, w * 0.90f);
+    assertEquals(0, reader.page);
+
+    // 5. 뒤로가기 시 터치 범위 오버레이만 닫히고 리더는 유지된다.
+    host.openTouchZoneEditor();
+    assertNotNull(host.touchZoneOverlay);
+    host.onBackPressed();
+    assertNull(host.touchZoneOverlay);
+    assertSame(reader, host.reader);
+  }
 }

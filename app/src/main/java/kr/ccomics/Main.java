@@ -63,6 +63,7 @@ public final class Main extends Activity {
   boolean starSpansReady;
   Runnable pendingThumbResize;
   ShelfDragController dragController;
+  TouchZoneOverlay touchZoneOverlay;
   String selected = "", shelf = "", query = "", scanMessage = "";
   int filter, requestId, gridIndex, gridOffset, volumeIndex, volumeOffset;
   boolean busy, loadingBook, dark, readerImmersive, arrangeMode;
@@ -2805,6 +2806,50 @@ public final class Main extends Activity {
         .show();
   }
 
+  String tapZoneSummary() {
+    float l = reader != null ? reader.tapLeft : prefs.getFloat("tapLeft", 0.33f);
+    float r = reader != null ? reader.tapRight : prefs.getFloat("tapRight", 0.67f);
+    int lp = Math.round(l * 100f);
+    int rp = Math.round((1f - r) * 100f);
+    int cp = Math.max(0, 100 - lp - rp);
+    return lp + "% · " + cp + "% · " + rp + "%";
+  }
+
+  void openTouchZoneEditor() {
+    if (reader == null || frame == null) return;
+    if (overlay != null) toggleReaderMenu();
+    closeTouchZoneEditor();
+    touchZoneOverlay =
+        new TouchZoneOverlay(
+            this,
+            reader.tapLeft,
+            reader.tapRight,
+            reader.rtl,
+            reader.doubleZoom,
+            new TouchZoneOverlay.Listener() {
+              public void onSave(float left, float right) {
+                float[] clamped = Reader.clampTapZones(left, right);
+                prefs.edit().putFloat("tapLeft", clamped[0]).putFloat("tapRight", clamped[1]).apply();
+                if (reader != null) reader.readGestures();
+                closeTouchZoneEditor();
+                toast("터치 범위를 저장했습니다.");
+              }
+
+              public void onCancel() {
+                closeTouchZoneEditor();
+              }
+            });
+    frame.addView(touchZoneOverlay, new FrameLayout.LayoutParams(-1, -1));
+    touchZoneOverlay.requestApplyInsets();
+  }
+
+  void closeTouchZoneEditor() {
+    if (touchZoneOverlay != null) {
+      if (frame != null) frame.removeView(touchZoneOverlay);
+      touchZoneOverlay = null;
+    }
+  }
+
   void readerSettings() {
     choices(
         "읽기 설정",
@@ -2817,6 +2862,7 @@ public final class Main extends Activity {
           "본문 배경색",
           prefs.getBoolean("autoNext", true) ? "다음 권 자동 열기  ✓" : "다음 권 자동 열기",
           "다음 권 읽기",
+          "터치 범위 설정   " + tapZoneSummary(),
           "터치·제스처 설정"
         },
         i -> {
@@ -2841,7 +2887,8 @@ public final class Main extends Activity {
             toast(prefs.getBoolean("autoNext", true) ? "다음 권을 자동으로 엽니다." : "다음 권을 열기 전에 확인합니다.");
           }
           if (i == 7) nextVolume();
-          if (i == 8) gestureSettings();
+          if (i == 8) openTouchZoneEditor();
+          if (i == 9) gestureSettings();
         });
   }
 
@@ -2900,26 +2947,15 @@ public final class Main extends Activity {
     addGestureSwitch(box, "가운데 더블 탭으로 확대·축소", "doubleZoom", false);
     addGestureSwitch(box, "두 손가락으로 확대·축소", "pinchZoom", true);
     addGestureSwitch(box, "왼쪽 가장자리에서 위아래로 밝기 조절", "brightnessGesture", false);
-    TextView width = label("좌우 탭 영역", 14, ink, true);
-    pad(width, 0, 8);
-    box.addView(width);
-    RadioGroup sizes = new RadioGroup(builder.getContext());
-    sizes.setOrientation(LinearLayout.HORIZONTAL);
-    box.addView(sizes);
-    String[] choices = {"좁게", "기본", "넓게"};
-    for (int i = 0; i < choices.length; i++) {
-      RadioButton option = new RadioButton(builder.getContext());
-      option.setText(choices[i]);
-      option.setId(View.generateViewId());
-      sizes.addView(option);
-      if (i == prefs.getInt("tapWidth", 1)) sizes.check(option.getId());
-    }
-    sizes.setOnCheckedChangeListener(
-        (group, id) -> {
-          prefs.edit().putInt("tapWidth", group.indexOfChild(group.findViewById(id))).apply();
-          reader.readGestures();
-        });
-    builder.setTitle("터치·제스처 설정").setView(scroll).setPositiveButton("완료", null).show();
+    final AlertDialog[] holder = new AlertDialog[1];
+    box.addView(
+        action(
+            "터치 범위 설정 (" + tapZoneSummary() + ")",
+            () -> {
+              if (holder[0] != null) holder[0].dismiss();
+              openTouchZoneEditor();
+            }));
+    holder[0] = builder.setTitle("터치·제스처 설정").setView(scroll).setPositiveButton("완료", null).show();
   }
 
   void addGestureSwitch(LinearLayout box, String title, String key, boolean initial) {
@@ -2980,6 +3016,7 @@ public final class Main extends Activity {
   }
 
   void leaveReader() {
+    closeTouchZoneEditor();
     requestId++;
     String closedGrp = reader.book.grp;
     reader.close();
@@ -2999,6 +3036,10 @@ public final class Main extends Activity {
   }
 
   public void onBackPressed() {
+    if (touchZoneOverlay != null) {
+      closeTouchZoneEditor();
+      return;
+    }
     if (reader != null) {
       leaveReader();
       return;
