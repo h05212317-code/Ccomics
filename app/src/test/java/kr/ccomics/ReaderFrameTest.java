@@ -134,21 +134,80 @@ public class ReaderFrameTest {
   }
 
   @Test
-  public void bookshelfSelectorFitsLargeTextOnNarrowScreen() {
-    android.widget.LinearLayout row = host.shelfSummary(42);
-    android.widget.TextView button = (android.widget.TextView) row.getChildAt(1);
-    button.setTextSize(28);
-    row.measure(
-        android.view.View.MeasureSpec.makeMeasureSpec(
-            host.dp(280), android.view.View.MeasureSpec.EXACTLY),
-        android.view.View.MeasureSpec.UNSPECIFIED);
-    row.layout(0, 0, row.getMeasuredWidth(), row.getMeasuredHeight());
-    assertTrue(
-        button.getLayout().getHeight()
-            <= button.getHeight()
-                - button.getCompoundPaddingTop()
-                - button.getCompoundPaddingBottom());
-    assertTrue(button.getBottom() <= row.getHeight() - row.getPaddingBottom());
+  @Config(qualifiers = "w320dp-h640dp")
+  public void redesignedLibraryTopMenuStarHeaderAndFloatingResume() {
+    host.frame = new android.widget.FrameLayout(host);
+    host.setContentView(host.frame);
+    host.prefs.edit().clear().apply();
+    host.db.exec(
+        "UPDATE books SET title='원피스 1권',series='원피스',grp='series:원피스',rating=5,opened=100,page=4,pages=20,done=0 WHERE id=1");
+    host.db.exec(
+        "INSERT INTO books(id,title,series,grp,rating,pages) VALUES(2,'나루토 1권','나루토','series:나루토',5,10)");
+    host.db.exec(
+        "INSERT INTO books(id,title,series,grp,rating,pages) VALUES(3,'블리치 1권','블리치','series:블리치',4,10)");
+    host.books = host.db.books();
+    host.groups.clear();
+    for (Library.Book b : host.books)
+      host.groups.computeIfAbsent(b.grp, k -> new java.util.ArrayList<>()).add(b);
+
+    // 1. 상단 통합 메뉴([전체] ⌄)와 하단 플로팅 이어읽기 기본 ON 확인
+    assertTrue(host.showFloatingResume());
+    host.selected = "";
+    host.shelf = "";
+    host.renderLibrary();
+
+    android.view.ViewGroup topBar = (android.view.ViewGroup) host.root.getChildAt(0);
+    android.view.ViewGroup menuBtn = (android.view.ViewGroup) topBar.getChildAt(0);
+    android.widget.TextView pill = (android.widget.TextView) menuBtn.getChildAt(0);
+    assertEquals("전체", pill.getText().toString());
+    assertEquals(host.dp(30), pill.getLayoutParams().height);
+    assertEquals("메뉴 열기", menuBtn.getChildAt(1).getContentDescription().toString());
+
+    // 별점 첫 헤더: 정렬방식 ↑/↓ + 숫자만(작품 문구 없음, ★별점 없음), 빨간색 강조
+    android.view.View firstHdr = host.sectionAdapter.getView(0, null, host.shelfList);
+    android.view.ViewGroup firstLine = (android.view.ViewGroup) ((android.view.ViewGroup) firstHdr).getChildAt(1);
+    android.widget.TextView sortTv = (android.widget.TextView) firstLine.getChildAt(1);
+    android.widget.TextView countTv = (android.widget.TextView) firstLine.getChildAt(2);
+    assertEquals(android.view.View.VISIBLE, sortTv.getVisibility());
+    assertEquals("제목순 ↑", sortTv.getText().toString());
+    assertFalse(sortTv.getText().toString().contains("★별점"));
+    assertEquals("2", countTv.getText().toString());
+    assertEquals(host.countAccentColor(), countTv.getCurrentTextColor());
+
+    // 두 번째 별점 헤더: 정렬 텍스트 숨김, 숫자만("1") 표시
+    android.view.View secondHdr = host.sectionAdapter.getView(2, null, host.shelfList);
+    android.view.ViewGroup secondLine = (android.view.ViewGroup) ((android.view.ViewGroup) secondHdr).getChildAt(1);
+    assertEquals(android.view.View.GONE, secondLine.getChildAt(1).getVisibility());
+    assertEquals("1", ((android.widget.TextView) secondLine.getChildAt(2)).getText().toString());
+
+    // 플로팅 이어 읽기 오버레이 존재 (body = SwipeRefreshLayout + floatingBar)
+    android.view.ViewGroup body =
+        (android.view.ViewGroup) host.root.getChildAt(host.root.getChildCount() - 1);
+    assertTrue(host.floatingResumeVisible);
+    assertEquals(2, body.getChildCount());
+
+    // 플로팅 좌/우 스와이프로 닫기 동작 확인
+    android.view.View floating = body.getChildAt(1);
+    long t = android.os.SystemClock.uptimeMillis();
+    android.view.MotionEvent d = android.view.MotionEvent.obtain(t, t, 0, 200f, 500f, 0);
+    android.view.MotionEvent m = android.view.MotionEvent.obtain(t, t + 20, 2, 200f + host.dp(100), 500f, 0);
+    android.view.MotionEvent u = android.view.MotionEvent.obtain(t, t + 40, 1, 200f + host.dp(110), 500f, 0);
+    floating.dispatchTouchEvent(d);
+    floating.dispatchTouchEvent(m);
+    floating.dispatchTouchEvent(u);
+    d.recycle();
+    m.recycle();
+    u.recycle();
+    assertTrue(host.resumeDismissed);
+    assertFalse(host.floatingResumeVisible);
+
+    // 설정 OFF일 때는 resumeDismissed=false여도 표시하지 않음
+    host.resumeDismissed = false;
+    host.prefs.edit().putBoolean("showFloatingResume", false).apply();
+    host.renderLibrary();
+    body = (android.view.ViewGroup) host.root.getChildAt(host.root.getChildCount() - 1);
+    assertFalse(host.floatingResumeVisible);
+    assertEquals(1, body.getChildCount());
   }
 
   @Test

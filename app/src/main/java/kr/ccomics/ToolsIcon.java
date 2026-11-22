@@ -8,6 +8,7 @@ final class ToolsIcon extends View {
   final String symbol;
   final int ink;
   final Paint p = new Paint(1);
+  final Path path = new Path();
 
   ToolsIcon(Context c, String symbol, int color, String label) {
     super(c);
@@ -88,6 +89,19 @@ final class ToolsIcon extends View {
         line(c, 14, 20, 21, 18);
         line(c, 21, 18, 21, 5);
         line(c, 12, 9, 12, 22);
+        break;
+      case "chevron_down":
+        line(c, 7, 10, 12, 15);
+        line(c, 12, 15, 17, 10);
+        break;
+      case "play":
+        p.setStyle(Paint.Style.FILL);
+        path.reset();
+        path.moveTo(9f, 6.5f);
+        path.lineTo(18f, 12f);
+        path.lineTo(9f, 17.5f);
+        path.close();
+        c.drawPath(path, p);
         break;
     }
     c.restore();

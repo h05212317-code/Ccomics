@@ -66,7 +66,7 @@ public final class Main extends Activity {
   TouchZoneOverlay touchZoneOverlay;
   String selected = "", shelf = "", query = "", scanMessage = "";
   int filter, requestId, gridIndex, gridOffset, volumeIndex, volumeOffset;
-  boolean busy, loadingBook, dark, readerImmersive, arrangeMode;
+  boolean busy, loadingBook, dark, readerImmersive, arrangeMode, resumeDismissed, floatingResumeVisible;
   int bg, ink, muted, surface, accent;
 
   static final class SeriesEntry {
@@ -196,6 +196,7 @@ public final class Main extends Activity {
       gridOffset = state.getInt("offset");
       volumeIndex = state.getInt("volumeIndex");
       volumeOffset = state.getInt("volumeOffset");
+      resumeDismissed = state.getBoolean("resumeDismissed");
     }
     frame = new FrameLayout(this);
     setContentView(frame);
@@ -239,6 +240,7 @@ public final class Main extends Activity {
     b.putInt("offset", gridOffset);
     b.putInt("volumeIndex", volumeIndex);
     b.putInt("volumeOffset", volumeOffset);
+    b.putBoolean("resumeDismissed", resumeDismissed);
     if (reader != null) b.putLong("reading", reader.book.id);
   }
 
@@ -314,7 +316,7 @@ public final class Main extends Activity {
 
   void icon(LinearLayout bar, String symbol, String desc, int color, Runnable click) {
     ToolsIcon v = new ToolsIcon(this, symbol, color, desc);
-    bar.addView(v, dp(44), dp(48));
+    bar.addView(v, dp(42), dp(44));
     v.setOnClickListener(w -> click.run());
   }
 
@@ -406,6 +408,151 @@ public final class Main extends Activity {
   String sortLabel(int sort, boolean desc) {
     int idx = sort >= 0 && sort < SORT_NAMES.length ? sort : SORT_TITLE;
     return SORT_NAMES[idx] + " " + (desc ? "↓" : "↑");
+  }
+
+  boolean showFloatingResume() {
+    return prefs.getBoolean("showFloatingResume", true);
+  }
+
+  int countAccentColor() {
+    return dark ? 0xffff5286 : 0xffff2e6e;
+  }
+
+  String filterLabel() {
+    String[] labels = {"전체", "읽는 중", "완독", "즐겨찾기"};
+    String f = labels[Math.max(0, Math.min(labels.length - 1, filter))];
+    if (shelf.isEmpty()) return f;
+    return filter == 0 ? shelf : shelf + " · " + f;
+  }
+
+  void showLibraryMenu() {
+    AlertDialog.Builder builder = dialog();
+    ScrollView scroll = new ScrollView(builder.getContext());
+    LinearLayout box = col();
+    pad(box, 20, 8);
+    scroll.addView(box);
+
+    int[] counts = new int[4];
+    for (SeriesEntry e : entries.values()) {
+      if (!shelf.isEmpty() && !e.shelves.contains(shelf)) continue;
+      counts[0]++;
+      if (e.hasReading) counts[1]++;
+      if (e.hasDone) counts[2]++;
+      if (e.hasFav) counts[3]++;
+    }
+
+    final AlertDialog[] holder = new AlertDialog[1];
+    TextView filterHdr = label("보기", 12, muted, true);
+    pad(filterHdr, 0, 6);
+    box.addView(filterHdr);
+
+    String[] filterNames = {"전체", "읽는 중", "완독", "즐겨찾기"};
+    for (int i = 0; i < filterNames.length; i++) {
+      final int idx = i;
+      boolean active = filter == i;
+      LinearLayout item = row();
+      pad(item, 4, 11);
+      item.setMinimumHeight(dp(44));
+      TextView name = label((active ? "✓  " : "") + filterNames[i], 15, active ? accent : ink, active);
+      weight(item, name);
+      item.addView(label(String.valueOf(counts[i]), 14, active ? countAccentColor() : muted, true));
+      item.setOnClickListener(
+          v -> {
+            filter = idx;
+            selected = "";
+            gridIndex = gridOffset = 0;
+            if (holder[0] != null) holder[0].dismiss();
+            renderNow(false);
+          });
+      box.addView(item, -1, -2);
+    }
+
+    View divider = new View(this);
+    divider.setBackgroundColor(surface);
+    LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, dp(1));
+    dlp.setMargins(0, dp(6), 0, dp(6));
+    box.addView(divider, dlp);
+
+    TextView shelfHdr = label("책장", 12, muted, true);
+    pad(shelfHdr, 0, 6);
+    box.addView(shelfHdr);
+
+    List<String> shelfNames = new ArrayList<>();
+    shelfNames.add("전체 책장");
+    shelfNames.addAll(db.strings("SELECT name FROM shelves ORDER BY name"));
+    for (int i = 0; i < shelfNames.size(); i++) {
+      final int idx = i;
+      final String targetShelf = i == 0 ? "" : shelfNames.get(i);
+      boolean active = shelf.equals(targetShelf);
+      int scount = 0;
+      for (SeriesEntry e : entries.values()) {
+        if (targetShelf.isEmpty() || e.shelves.contains(targetShelf)) scount++;
+      }
+      LinearLayout item = row();
+      pad(item, 4, 11);
+      item.setMinimumHeight(dp(44));
+      TextView name =
+          label((active ? "✓  " : "") + shelfNames.get(i), 15, active ? accent : ink, active);
+      one(name);
+      weight(item, name);
+      item.addView(label(String.valueOf(scount), 14, active ? countAccentColor() : muted, true));
+      item.setOnClickListener(
+          v -> {
+            shelf = targetShelf;
+            selected = "";
+            gridIndex = gridOffset = 0;
+            if (holder[0] != null) holder[0].dismiss();
+            renderNow(false);
+          });
+      box.addView(item, -1, -2);
+    }
+
+    TextView newShelfBtn = label("+ 새 책장 만들기", 14, accent, true);
+    pad(newShelfBtn, 4, 12);
+    newShelfBtn.setMinimumHeight(dp(44));
+    newShelfBtn.setGravity(Gravity.CENTER_VERTICAL);
+    newShelfBtn.setOnClickListener(
+        v -> {
+          if (holder[0] != null) holder[0].dismiss();
+          createOrRenameShelf(true);
+        });
+    box.addView(newShelfBtn, -1, -2);
+
+    if (!shelf.isEmpty()) {
+      TextView renameBtn = label("현재 책장 이름 변경", 14, muted, true);
+      pad(renameBtn, 4, 10);
+      renameBtn.setMinimumHeight(dp(44));
+      renameBtn.setGravity(Gravity.CENTER_VERTICAL);
+      renameBtn.setOnClickListener(
+          v -> {
+            if (holder[0] != null) holder[0].dismiss();
+            createOrRenameShelf(false);
+          });
+      box.addView(renameBtn, -1, -2);
+    }
+
+    holder[0] = builder.setTitle("보기 및 책장").setView(scroll).setNegativeButton("닫기", null).show();
+  }
+
+  void createOrRenameShelf(boolean create) {
+    input(
+        create ? "새 책장" : "책장 이름 변경",
+        create ? "" : shelf,
+        s -> {
+          if (s.isEmpty()) return;
+          if (!create && db.strings("SELECT name FROM shelves WHERE name=?", s).size() > 0) {
+            toast("같은 이름의 책장이 있습니다.");
+            return;
+          }
+          if (create) db.exec("INSERT OR IGNORE INTO shelves VALUES(?)", s);
+          else {
+            db.exec("UPDATE shelves SET name=? WHERE name=?", s, shelf);
+            db.exec("UPDATE books SET shelf=? WHERE shelf=?", s, shelf);
+          }
+          shelf = s;
+          selected = "";
+          library(false);
+        });
   }
 
   static String stars(int rating) {
@@ -733,56 +880,49 @@ public final class Main extends Activity {
     frame.addView(root, -1, -1);
     ViewCompat.requestApplyInsets(frame);
     LinearLayout bar = row();
-    pad(bar, 8, 3);
-    root.addView(bar, -1, dp(54));
+    pad(bar, 10, 2);
+    root.addView(bar, -1, dp(48));
     boolean showFilters = selected.isEmpty();
-    if (!showFilters)
-      icon(
-          bar,
-          "back",
-          "책장으로",
-          ink,
-          () -> {
+    View leftLead;
+    if (!showFilters) {
+      ToolsIcon backBtn = new ToolsIcon(this, "back", ink, "책장으로");
+      bar.addView(backBtn, dp(44), dp(44));
+      backBtn.setOnClickListener(
+          w -> {
             selected = "";
             renderNow(false);
           });
-    HorizontalScrollView sc = new HorizontalScrollView(this);
-    sc.setHorizontalScrollBarEnabled(false);
-    LinearLayout tabs = row();
-    pad(tabs, 3, 0);
-    sc.addView(tabs);
-    bar.addView(sc, new LinearLayout.LayoutParams(0, -2, 1));
-    if (showFilters) {
-      String[] labels = {"전체", "읽는 중", "완독", "즐겨찾기"};
-      for (int i = 0; i < labels.length; i++) {
-        final int index = i;
-        TextView tab =
-            action(
-                labels[i],
-                () -> {
-                  filter = index;
-                  selected = "";
-                  gridIndex = gridOffset = 0;
-                  renderNow(false);
-                });
-        pad(tab, 7, 0);
-        tab.setSingleLine();
-        tab.setSelected(filter == i);
-        tab.setTextColor(filter == i ? bg : muted);
-        if (filter == i) tab.setBackground(shape(ink, 22));
-        tabs.addView(tab);
-      }
+      leftLead = backBtn;
+    } else {
+      LinearLayout menuBtn = row();
+      menuBtn.setMinimumHeight(dp(44));
+      menuBtn.setPadding(dp(4), 0, dp(4), 0);
+      menuBtn.setFocusable(true);
+      menuBtn.setContentDescription("보기 및 책장 선택");
+      TextView pill = label(filterLabel(), 14, bg, true);
+      one(pill);
+      pill.setGravity(Gravity.CENTER);
+      pill.setMaxWidth(dp(168));
+      pill.setPadding(dp(13), 0, dp(13), 0);
+      pill.setBackground(shape(ink, 15));
+      menuBtn.addView(pill, new LinearLayout.LayoutParams(-2, dp(30)));
+      ToolsIcon chev = new ToolsIcon(this, "chevron_down", ink, "메뉴 열기");
+      LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(dp(22), dp(30));
+      clp.leftMargin = dp(2);
+      menuBtn.addView(chev, clp);
+      menuBtn.setOnClickListener(w -> showLibraryMenu());
+      bar.addView(menuBtn, new LinearLayout.LayoutParams(-2, dp(44)));
+      leftLead = menuBtn;
     }
+    View spacer = new View(this);
+    bar.addView(spacer, new LinearLayout.LayoutParams(0, 0, 1));
     boolean showArrange = showFilters && currentSort() == SORT_CUSTOM;
-    tabs.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+    leftLead.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
+    int iconW = showArrange ? 40 : 42;
     int available =
-        dp(
-                getResources().getConfiguration().screenWidthDp
-                    - 16
-                    - (showFilters ? 0 : 44)
-                    - (showArrange ? 44 : 0))
-            - tabs.getMeasuredWidth();
-    boolean showSearch = available >= dp(176), showAdd = available >= dp(132);
+        dp(getResources().getConfiguration().screenWidthDp - 20 - (showArrange ? iconW : 0))
+            - leftLead.getMeasuredWidth();
+    boolean showSearch = available >= dp(iconW * 4), showAdd = available >= dp(iconW * 3);
     if (showSearch) icon(bar, "search", "책 검색", ink, this::searchLibrary);
     if (showFilters) {
       int curSort = currentSort();
@@ -802,7 +942,7 @@ public final class Main extends Activity {
               arrangeMode ? bg : ink,
               arrangeMode ? "배치 완료" : "배치 모드");
       if (arrangeMode) arrBtn.setBackground(shape(accent, 22));
-      bar.addView(arrBtn, dp(44), dp(48));
+      bar.addView(arrBtn, dp(42), dp(44));
       arrBtn.setOnClickListener(
           w -> {
             arrangeMode = !arrangeMode;
@@ -852,8 +992,7 @@ public final class Main extends Activity {
     pad(scanBanner, 20, 6);
     scanBanner.setVisibility(bannerText.isEmpty() ? View.GONE : View.VISIBLE);
     root.addView(scanBanner);
-    LinearLayout body = row();
-    body.setGravity(Gravity.TOP);
+    FrameLayout body = new FrameLayout(this);
     root.addView(body, new LinearLayout.LayoutParams(-1, 0, 1));
     LinearLayout pane = col();
     SwipeRefreshLayout pull = new SwipeRefreshLayout(this);
@@ -871,7 +1010,8 @@ public final class Main extends Activity {
           if (!refreshSources(true)) pull.setRefreshing(false);
         });
     pull.setRefreshing(!scanning.isEmpty());
-    if (selected.isEmpty()) libraryPane(pane);
+    floatingResumeVisible = false;
+    if (selected.isEmpty()) libraryPane(pane, body);
     else detailPane(pane);
   }
 
@@ -917,36 +1057,15 @@ public final class Main extends Activity {
         seriesName, b.title, b.comicNumber, prefs.getBoolean("hideVolumeTags", true));
   }
 
-  void libraryPane(LinearLayout pane) {
-    if (filter == 0 && query.isEmpty()) {
-      Library.Book last = null;
+  void libraryPane(LinearLayout pane, FrameLayout host) {
+    Library.Book recent = null;
+    if (!arrangeMode && filter == 0 && query.isEmpty() && showFloatingResume() && !resumeDismissed) {
       for (int i = 0; i < books.size(); i++) {
         Library.Book b = books.get(i);
         if (b.opened > 0
             && !b.done
-            && (last == null || b.opened > last.opened)
-            && (shelf.isEmpty() || shelf.equals(b.shelf))) last = b;
-      }
-      if (last != null) {
-        final Library.Book recent = last;
-        LinearLayout resume = row();
-        resume.setBackground(shape(surface, 9));
-        pad(resume, 12, 6);
-        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, dp(72));
-        rp.setMargins(dp(18), dp(14), dp(18), 0);
-        pane.addView(resume, rp);
-        ImageView small = new ImageView(this);
-        resume.addView(small, dp(39), dp(56));
-        loadCover(small, recent);
-        LinearLayout tx = col();
-        pad(tx, 12, 0);
-        weight(resume, tx);
-        tx.addView(label("이어 읽기", 12, accent, true));
-        TextView name = label(volumeTitle(recent), 16, ink, true);
-        one(name);
-        tx.addView(name);
-        resume.addView(label((recent.page + 1) + " / " + recent.pages, 12, muted, false));
-        resume.setOnClickListener(v -> open(recent));
+            && (recent == null || b.opened > recent.opened)
+            && (shelf.isEmpty() || shelf.equals(b.shelf))) recent = b;
       }
     }
     List<SeriesEntry> list = new ArrayList<>(entries.size());
@@ -977,7 +1096,31 @@ public final class Main extends Activity {
             return n == 0 ? Order.natural(a.displayTitle, b.displayTitle) : n;
           }
         });
-    pane.addView(shelfSummary(list.size()), -1, LinearLayout.LayoutParams.WRAP_CONTENT);
+    if (!query.isEmpty()) {
+      LinearLayout searchBar = row();
+      pad(searchBar, 18, 2);
+      searchBar.setMinimumHeight(dp(38));
+      TextView qText = label("‘" + query + "’ 검색 결과", 13, muted, true);
+      one(qText);
+      searchBar.addView(qText);
+      TextView qCount = label(String.valueOf(list.size()), 14, countAccentColor(), true);
+      LinearLayout.LayoutParams qcp = new LinearLayout.LayoutParams(-2, -2);
+      qcp.leftMargin = dp(6);
+      searchBar.addView(qCount, qcp);
+      View sp = new View(this);
+      searchBar.addView(sp, new LinearLayout.LayoutParams(0, 0, 1));
+      TextView clearBtn =
+          action(
+              "검색 해제",
+              () -> {
+                query = "";
+                renderNow(true);
+              });
+      clearBtn.setMinHeight(dp(36));
+      pad(clearBtn, 8, 4);
+      searchBar.addView(clearBtn);
+      pane.addView(searchBar, -1, LinearLayout.LayoutParams.WRAP_CONTENT);
+    }
     if (list.isEmpty()) {
       LinearLayout empty = col();
       empty.setGravity(Gravity.CENTER);
@@ -994,6 +1137,7 @@ public final class Main extends Activity {
       }
       return;
     }
+    floatingResumeVisible = recent != null;
     if (byRating) {
       @SuppressWarnings("unchecked")
       List<CoverItem>[] buckets = new List[6];
@@ -1009,20 +1153,177 @@ public final class Main extends Activity {
         }
       }
       starSectionList(pane, sections, true);
-      return;
+    } else {
+      LinearLayout flatHeader = row();
+      pad(flatHeader, 18, 4);
+      View leftSpace = new View(this);
+      flatHeader.addView(leftSpace, new LinearLayout.LayoutParams(0, 0, 1));
+      TextView sortText = label(sortLabel(sort, desc), 13, muted, true);
+      sortText.setOnClickListener(v -> pickSort());
+      flatHeader.addView(sortText);
+      TextView countText = label(String.valueOf(list.size()), 14, countAccentColor(), true);
+      LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2);
+      clp.leftMargin = dp(7);
+      flatHeader.addView(countText, clp);
+      pane.addView(flatHeader, -1, LinearLayout.LayoutParams.WRAP_CONTENT);
+
+      List<CoverItem> covers = new ArrayList<>(list.size());
+      for (int i = 0; i < list.size(); i++) {
+        SeriesEntry e = list.get(i);
+        covers.add(new CoverItem(e.rep, e.displayTitle, e.subtitleWithStar));
+      }
+      if (sort == SORT_CUSTOM) {
+        List<StarSection> flat = new ArrayList<>(1);
+        flat.add(new StarSection(-1, covers));
+        starSectionList(pane, flat, false);
+      } else {
+        coverGrid(pane, covers, false);
+      }
     }
-    List<CoverItem> covers = new ArrayList<>(list.size());
-    for (int i = 0; i < list.size(); i++) {
-      SeriesEntry e = list.get(i);
-      covers.add(new CoverItem(e.rep, e.displayTitle, e.subtitleWithStar));
+    if (recent != null) addFloatingResume(host, recent);
+  }
+
+  void addFloatingResume(FrameLayout host, final Library.Book recent) {
+    final LinearLayout bar = row();
+    GradientDrawable bgShape = new GradientDrawable();
+    bgShape.setCornerRadius(dp(18));
+    if (dark) {
+      bgShape.setColor(0xf22d322e);
+      bgShape.setStroke(dp(1), 0x2cf2f1e9);
+    } else {
+      bgShape.setColor(0xee222822);
     }
-    if (sort == SORT_CUSTOM) {
-      List<StarSection> flat = new ArrayList<>(1);
-      flat.add(new StarSection(-1, covers));
-      starSectionList(pane, flat, false);
-      return;
-    }
-    coverGrid(pane, covers, false);
+    bar.setBackground(bgShape);
+    bar.setElevation(dp(8));
+    bar.setPadding(dp(14), dp(11), dp(14), dp(11));
+
+    ImageView small = new ImageView(this);
+    small.setScaleType(ImageView.ScaleType.CENTER_CROP);
+    small.setBackgroundColor(0x28ffffff);
+    small.setOutlineProvider(
+        new ViewOutlineProvider() {
+          @Override
+          public void getOutline(View view, Outline outline) {
+            outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), dp(5));
+          }
+        });
+    small.setClipToOutline(true);
+    bar.addView(small, dp(34), dp(46));
+    loadCover(small, recent);
+
+    LinearLayout tx = col();
+    tx.setPadding(dp(12), 0, dp(10), 0);
+    weight(bar, tx);
+    LinearLayout meta = row();
+    meta.addView(label("이어 읽기", 11, 0xffa6c8af, true));
+    meta.addView(label("  ·  " + (recent.page + 1) + " / " + recent.pages, 11, 0xb8f2f1e9, false));
+    tx.addView(meta);
+    TextView name = label(volumeTitle(recent), 14, 0xfff5f5f0, true);
+    one(name);
+    name.setPadding(0, dp(3), 0, 0);
+    tx.addView(name);
+
+    ToolsIcon play = new ToolsIcon(this, "play", 0xfff5f5f0, "이어 읽기");
+    play.setBackground(shape(0x24ffffff, 15));
+    bar.addView(play, dp(30), dp(30));
+
+    boolean wide = getResources().getConfiguration().screenWidthDp >= 520;
+    FrameLayout.LayoutParams lp =
+        new FrameLayout.LayoutParams(
+            wide ? dp(372) : FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+    lp.setMargins(dp(16), 0, dp(16), dp(14));
+    host.addView(bar, lp);
+
+    final int touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
+    final int dismissDist = dp(76);
+    final float flingVelocity = dp(420);
+    bar.setOnTouchListener(
+        new View.OnTouchListener() {
+          float downRawX, downRawY;
+          boolean dragging, dismissed;
+          VelocityTracker vt;
+
+          void recycleTracker() {
+            if (vt != null) {
+              vt.recycle();
+              vt = null;
+            }
+          }
+
+          @Override
+          public boolean onTouch(View v, MotionEvent e) {
+            if (dismissed) return true;
+            switch (e.getActionMasked()) {
+              case MotionEvent.ACTION_DOWN:
+                downRawX = e.getRawX();
+                downRawY = e.getRawY();
+                dragging = false;
+                recycleTracker();
+                vt = VelocityTracker.obtain();
+                vt.addMovement(e);
+                return true;
+              case MotionEvent.ACTION_MOVE:
+                if (vt != null) vt.addMovement(e);
+                float dx = e.getRawX() - downRawX;
+                float dy = e.getRawY() - downRawY;
+                if (!dragging && Math.abs(dx) > touchSlop && Math.abs(dx) > Math.abs(dy)) {
+                  dragging = true;
+                  ViewParent p = v.getParent();
+                  if (p != null) p.requestDisallowInterceptTouchEvent(true);
+                }
+                if (dragging) {
+                  v.setTranslationX(dx);
+                  v.setAlpha(Math.max(0.15f, 1f - Math.abs(dx) / dp(180)));
+                }
+                return true;
+              case MotionEvent.ACTION_UP:
+                float upDx = e.getRawX() - downRawX;
+                float vx = 0f;
+                if (vt != null) {
+                  vt.addMovement(e);
+                  vt.computeCurrentVelocity(1000);
+                  vx = vt.getXVelocity();
+                }
+                recycleTracker();
+                if (!dragging) {
+                  open(recent);
+                  return true;
+                }
+                boolean fastFling =
+                    Math.abs(vx) >= flingVelocity && Math.abs(upDx) > dp(24) && (vx * upDx > 0);
+                if (Math.abs(upDx) >= dismissDist || fastFling) {
+                  dismissed = true;
+                  resumeDismissed = true;
+                  floatingResumeVisible = false;
+                  float targetX =
+                      (upDx >= 0 ? 1f : -1f) * Math.max(dp(380), host.getWidth() + dp(40));
+                  v.animate()
+                      .translationX(targetX)
+                      .alpha(0f)
+                      .setDuration(180)
+                      .setInterpolator(new DecelerateInterpolator())
+                      .withEndAction(
+                          () -> {
+                            host.removeView(v);
+                            if (shelfList != null) shelfList.setPadding(0, dp(2), 0, dp(22));
+                            if (grid != null && !Boolean.TRUE.equals(grid.getTag()))
+                              grid.setPadding(dp(18), dp(3), dp(18), dp(22));
+                          })
+                      .start();
+                } else {
+                  v.animate().translationX(0f).alpha(1f).setDuration(160).start();
+                }
+                return true;
+              case MotionEvent.ACTION_CANCEL:
+                recycleTracker();
+                if (dragging) v.animate().translationX(0f).alpha(1f).setDuration(160).start();
+                return true;
+            }
+            return false;
+          }
+        });
   }
 
   static final class CoverItem {
@@ -1290,14 +1591,27 @@ public final class Main extends Activity {
           pad(line, 18, 4);
           TextView starText = label("", 18, ink, true);
           weight(line, starText);
-          TextView countText = label("", 13, muted, true);
+          TextView sortText = label("", 13, muted, true);
+          sortText.setPadding(dp(6), dp(4), dp(7), dp(4));
+          sortText.setOnClickListener(v -> pickSort());
+          line.addView(sortText);
+          TextView countText = label("", 14, countAccentColor(), true);
           line.addView(countText);
           hdr.addView(line);
         }
         hdr.getChildAt(0).setVisibility(pos == 0 ? View.GONE : View.VISIBLE);
         LinearLayout line = (LinearLayout) hdr.getChildAt(1);
         ((TextView) line.getChildAt(0)).setText(styledStars(rowData.rating));
-        ((TextView) line.getChildAt(1)).setText(rowData.count + "작품");
+        TextView sortText = (TextView) line.getChildAt(1);
+        if (pos == 0) {
+          sortText.setText(sortLabel(currentSort(), currentSortDesc()));
+          sortText.setVisibility(View.VISIBLE);
+        } else {
+          sortText.setVisibility(View.GONE);
+        }
+        TextView countText = (TextView) line.getChildAt(2);
+        countText.setTextColor(countAccentColor());
+        countText.setText(String.valueOf(rowData.count));
         return hdr;
       }
       LinearLayout rowView;
@@ -1867,7 +2181,7 @@ public final class Main extends Activity {
     shelfList.setSelector(new ColorDrawable(Color.TRANSPARENT));
     shelfList.setClipToPadding(false);
     shelfList.setClipChildren(false);
-    shelfList.setPadding(0, dp(2), 0, dp(22));
+    shelfList.setPadding(0, dp(2), 0, dp(floatingResumeVisible ? 96 : 22));
     int initialWidth = dp(getResources().getConfiguration().screenWidthDp);
     sectionAdapter = new StarSectionAdapter(sections, showHeaders, coverWidthDp(), initialWidth);
     shelfList.setAdapter(sectionAdapter);
@@ -1901,7 +2215,7 @@ public final class Main extends Activity {
     grid.setStretchMode(GridView.STRETCH_COLUMN_WIDTH);
     grid.setHorizontalSpacing(dp(14));
     grid.setVerticalSpacing(dp(18));
-    grid.setPadding(dp(18), dp(3), dp(18), dp(22));
+    grid.setPadding(dp(18), dp(3), dp(18), dp(!volumes && floatingResumeVisible ? 96 : 22));
     grid.setClipToPadding(false);
     final GridView g = grid;
     pane.addView(g, -1, -1);
@@ -2202,6 +2516,7 @@ public final class Main extends Activity {
           "책장 관리",
           "표지 크기 · " + coverWidthDp() + "dp",
           "별점순 표시하기 · " + (groupByRating() ? "켜짐" : "꺼짐"),
+          "이어 읽기 플로팅 · " + (showFloatingResume() ? "켜짐" : "꺼짐"),
           "화면 테마",
           "임시 파일 정리",
           "앱 업데이트 확인",
@@ -2218,16 +2533,23 @@ public final class Main extends Activity {
             renderNow(false);
             toast(next ? "별점순으로 구분해 표시합니다." : "별점 구분 없이 전체 목록으로 표시합니다.");
           }
-          if (i == 4)
+          if (i == 4) {
+            boolean next = !showFloatingResume();
+            prefs.edit().putBoolean("showFloatingResume", next).apply();
+            resumeDismissed = false;
+            renderNow(true);
+            toast(next ? "이어 읽기 플로팅을 표시합니다." : "이어 읽기 플로팅을 숨깁니다.");
+          }
+          if (i == 5)
             pick("화면 테마", "theme", new String[] {"기기 설정", "밝게", "어둡게"}, () -> renderNow(true));
-          if (i == 6) updates.check(true);
-          if (i == 7) {
+          if (i == 7) updates.check(true);
+          if (i == 8) {
             boolean hide = !prefs.getBoolean("hideVolumeTags", true);
             prefs.edit().putBoolean("hideVolumeTags", hide).apply();
             renderNow(true);
             toast(hide ? "앞뒤 [문구]와 파일 표기를 숨깁니다." : "파일 이름을 그대로 표시합니다.");
           }
-          if (i == 5) {
+          if (i == 6) {
             worker.execute(
                 () -> {
                   Archive.clearSpools(this);
@@ -2566,6 +2888,7 @@ public final class Main extends Activity {
 
   void open(Library.Book b) {
     remember();
+    resumeDismissed = false;
     int token = ++requestId;
     loadingBook = true;
     scanMessage = "책을 여는 중…";
@@ -2890,37 +3213,6 @@ public final class Main extends Activity {
           if (i == 8) openTouchZoneEditor();
           if (i == 9) gestureSettings();
         });
-  }
-
-  LinearLayout shelfSummary(int works) {
-    LinearLayout count = row();
-    pad(count, 20, 0);
-    count.setMinimumHeight(dp(48));
-
-    TextView info =
-        label(
-            (query.isEmpty() ? "작품" : "‘" + query + "’ 검색 결과")
-                + "  "
-                + works
-                + "  ·  "
-                + sortLabel(currentSort(), currentSortDesc())
-                + (groupByRating() ? "  ·  ★별점" : ""),
-            14,
-            muted,
-            true);
-    one(info);
-    info.setOnClickListener(v -> pickSort());
-    weight(count, info);
-    if (!query.isEmpty())
-      count.addView(
-          action(
-              "검색 해제",
-              () -> {
-                query = "";
-                renderNow(true);
-              }));
-    else count.addView(action(shelf.isEmpty() ? "책장 선택" : shelf, this::shelves));
-    return count;
   }
 
   void turnEffects() {
