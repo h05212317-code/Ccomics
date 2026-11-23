@@ -2899,10 +2899,6 @@ public final class Main extends Activity {
   }
 
   void open(Library.Book b) {
-    open(b, false);
-  }
-
-  void open(Library.Book b, boolean fromEnd) {
     remember();
     resumeDismissed = false;
     int token = ++requestId;
@@ -2935,7 +2931,6 @@ public final class Main extends Activity {
                   sectionAdapter = null;
                   scanBanner = null;
                   frame.removeAllViews();
-                  if (fromEnd) b.page = Math.max(0, a.pages.size() - 1);
                   reader = new Reader(this, a, b);
                   frame.addView(reader, -1, -1);
                   overlay = topBar = null;
@@ -3331,12 +3326,12 @@ public final class Main extends Activity {
       for (int i = 1; i < group.size(); i++)
         if (group.get(i).id == reader.book.id) {
           Library.Book prev = group.get(i - 1);
-          if (prefs.getBoolean("autoNext", true)) open(prev, true);
+          if (prefs.getBoolean("autoNext", true)) open(prev);
           else
             dialog()
                 .setTitle("이전 권 읽기")
                 .setMessage(prev.title)
-                .setPositiveButton("열기", (d, w) -> open(prev, true))
+                .setPositiveButton("열기", (d, w) -> open(prev))
                 .setNegativeButton("취소", null)
                 .show();
           return;
