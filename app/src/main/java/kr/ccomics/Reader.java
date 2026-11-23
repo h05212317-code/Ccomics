@@ -777,6 +777,12 @@ final class Reader extends View {
         && !pinched
         && next(1) >= count()
         && (rtl ? x - downX : downX - x) > getWidth() * .15f) host.nextVolume();
+    if (action == MotionEvent.ACTION_UP
+        && drag
+        && target < 0
+        && !pinched
+        && next(-1) < 0
+        && (rtl ? downX - x : x - downX) > getWidth() * .15f) host.previousVolume();
     if (action == MotionEvent.ACTION_UP && drag && target >= 0) {
       boolean flick = progress > .045 && android.os.SystemClock.uptimeMillis() - touchStart < 330;
       boolean commit = peakTravel - progress < .055 && (progress > .17 || flick);
@@ -804,6 +810,10 @@ final class Reader extends View {
     if (target >= 0) return;
     if (next(dir) >= count()) {
       host.nextVolume();
+      return;
+    }
+    if (next(dir) < 0) {
+      host.previousVolume();
       return;
     }
     startTurn(dir);

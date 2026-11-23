@@ -410,6 +410,10 @@ public final class Main extends Activity {
     return SORT_NAMES[idx] + " " + (desc ? "↓" : "↑");
   }
 
+  boolean showShelfCount() {
+    return prefs.getBoolean("showShelfCount", false);
+  }
+
   boolean showFloatingResume() {
     return prefs.getBoolean("showFloatingResume", true);
   }
@@ -1106,7 +1110,7 @@ public final class Main extends Activity {
       TextView qCount = label(String.valueOf(list.size()), 14, countAccentColor(), true);
       LinearLayout.LayoutParams qcp = new LinearLayout.LayoutParams(-2, -2);
       qcp.leftMargin = dp(6);
-      searchBar.addView(qCount, qcp);
+      if (showShelfCount()) searchBar.addView(qCount, qcp);
       View sp = new View(this);
       searchBar.addView(sp, new LinearLayout.LayoutParams(0, 0, 1));
       TextView clearBtn =
@@ -1164,7 +1168,7 @@ public final class Main extends Activity {
       TextView countText = label(String.valueOf(list.size()), 14, countAccentColor(), true);
       LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2);
       clp.leftMargin = dp(7);
-      flatHeader.addView(countText, clp);
+      if (showShelfCount()) flatHeader.addView(countText, clp);
       pane.addView(flatHeader, -1, LinearLayout.LayoutParams.WRAP_CONTENT);
 
       List<CoverItem> covers = new ArrayList<>(list.size());
@@ -1612,6 +1616,7 @@ public final class Main extends Activity {
         TextView countText = (TextView) line.getChildAt(2);
         countText.setTextColor(countAccentColor());
         countText.setText(String.valueOf(rowData.count));
+        countText.setVisibility(showShelfCount() ? View.VISIBLE : View.GONE);
         return hdr;
       }
       LinearLayout rowView;
@@ -2520,7 +2525,8 @@ public final class Main extends Activity {
           "화면 테마",
           "임시 파일 정리",
           "앱 업데이트 확인",
-          "책 이름만 표시 · " + (prefs.getBoolean("hideVolumeTags", true) ? "켜짐" : "꺼짐")
+          "책 이름만 표시 · " + (prefs.getBoolean("hideVolumeTags", true) ? "켜짐" : "꺼짐"),
+          "작품 수 표시 · " + (showShelfCount() ? "켜짐" : "꺼짐")
         },
         i -> {
           if (i == 0) refreshSources(false);
@@ -2548,6 +2554,12 @@ public final class Main extends Activity {
             prefs.edit().putBoolean("hideVolumeTags", hide).apply();
             renderNow(true);
             toast(hide ? "앞뒤 [문구]와 파일 표기를 숨깁니다." : "파일 이름을 그대로 표시합니다.");
+          }
+          if (i == 9) {
+            boolean next = !showShelfCount();
+            prefs.edit().putBoolean("showShelfCount", next).apply();
+            renderNow(true);
+            toast(next ? "책장에 작품 수를 표시합니다." : "책장에서 작품 수를 숨깁니다.");
           }
           if (i == 6) {
             worker.execute(
@@ -2887,6 +2899,10 @@ public final class Main extends Activity {
   }
 
   void open(Library.Book b) {
+    open(b, false);
+  }
+
+  void open(Library.Book b, boolean fromEnd) {
     remember();
     resumeDismissed = false;
     int token = ++requestId;
@@ -2919,6 +2935,7 @@ public final class Main extends Activity {
                   sectionAdapter = null;
                   scanBanner = null;
                   frame.removeAllViews();
+                  if (fromEnd) b.page = Math.max(0, a.pages.size() - 1);
                   reader = new Reader(this, a, b);
                   frame.addView(reader, -1, -1);
                   overlay = topBar = null;
@@ -3305,6 +3322,26 @@ public final class Main extends Activity {
           return;
         }
     toast("마지막 권입니다.");
+  }
+
+  void previousVolume() {
+    if (reader == null || loadingBook) return;
+    List<Library.Book> group = groups.get(reader.book.grp);
+    if (group != null)
+      for (int i = 1; i < group.size(); i++)
+        if (group.get(i).id == reader.book.id) {
+          Library.Book prev = group.get(i - 1);
+          if (prefs.getBoolean("autoNext", true)) open(prev, true);
+          else
+            dialog()
+                .setTitle("이전 권 읽기")
+                .setMessage(prev.title)
+                .setPositiveButton("열기", (d, w) -> open(prev, true))
+                .setNegativeButton("취소", null)
+                .show();
+          return;
+        }
+    toast("첫 권입니다.");
   }
 
   void leaveReader() {
