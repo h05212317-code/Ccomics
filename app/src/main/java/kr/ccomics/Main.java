@@ -1332,12 +1332,19 @@ public final class Main extends Activity {
 
   static final class CoverItem {
     final Library.Book book;
-    final String title, subtitle;
+    final String title;
+    final CharSequence subtitle;
+    final boolean external;
 
-    CoverItem(Library.Book book, String title, String subtitle) {
+    CoverItem(Library.Book book, String title, CharSequence subtitle) {
+      this(book, title, subtitle, false);
+    }
+
+    CoverItem(Library.Book book, String title, CharSequence subtitle, boolean external) {
       this.book = book;
       this.title = title;
       this.subtitle = subtitle;
+      this.external = external;
     }
   }
 
@@ -1689,6 +1696,7 @@ public final class Main extends Activity {
           loadCover(h.img, item.book);
           h.name.setText(item.title);
           h.sub.setText(item.subtitle);
+          remoteMark(h.sub, item.external);
           boolean isDragged = arrangeMode && item.book.id == draggedBookId;
           h.root.setAlpha(isDragged ? 0.16f : 1f);
           h.syncWiggle(arrangeMode && !isDragged, item.book.id + c);
@@ -2271,6 +2279,7 @@ public final class Main extends Activity {
             loadCover(h.img, item.book);
             h.name.setText(item.title);
             h.sub.setText(item.subtitle);
+            remoteMark(h.sub, item.external);
             return h.root;
           }
         });
@@ -2323,6 +2332,20 @@ public final class Main extends Activity {
         });
   }
 
+  /** 기기 밖(PC 원격·Windows 공유)에서 추가된 권이면 아래 줄 오른쪽에 구름 아이콘을 붙인다. */
+  void remoteMark(TextView sub, boolean external) {
+    if (!external) {
+      sub.setCompoundDrawablesRelative(null, null, null, null);
+      return;
+    }
+    android.graphics.drawable.Drawable d = getDrawable(R.drawable.icon_remote).mutate();
+    d.setTint(muted);
+    int size = dp(13);
+    d.setBounds(0, 0, size, size);
+    sub.setCompoundDrawablePadding(dp(4));
+    sub.setCompoundDrawablesRelative(null, null, d, null);
+  }
+
   String shelfTitle(String title) {
     return Order.shelfTitle(title, prefs.getBoolean("hideVolumeTags", true));
   }
@@ -2349,11 +2372,26 @@ public final class Main extends Activity {
                   : b.done
                       ? "완독"
                       : b.opened > 0
-                          ? (b.page + 1) + " / " + b.pages + "쪽"
-                          : b.pages > 0 ? b.pages + "쪽" : "색인 대기";
-      covers.add(
-          new CoverItem(
-              b, Order.volumeDisplayTitle(name, b.title, b.comicNumber, hideTags), status));
+                          ? (b.page + 1) + " / " + b.pages + "페이지"
+                          : b.pages > 0 ? b.pages + "페이지" : "색인 대기";
+      // 권 표기는 제목 줄에서 빼서 아래 줄 앞에 제목과 같은 굵기·색으로 붙인다.
+      String display = Order.volumeDisplayTitle(name, b.title, b.comicNumber, hideTags);
+      String vol = Order.volumeLabel(b.title, b.comicNumber);
+      if (hideTags && !vol.isEmpty()) {
+        int at = display.indexOf(" " + vol);
+        if (at >= 0) display = (display.substring(0, at) + display.substring(at + vol.length() + 1)).trim();
+        if (display.isEmpty()) display = name;
+      }
+      android.text.SpannableStringBuilder sub = new android.text.SpannableStringBuilder();
+      if (!vol.isEmpty()) {
+        sub.append(vol);
+        sub.setSpan(new android.text.style.ForegroundColorSpan(ink), 0, vol.length(), 33);
+        sub.setSpan(
+            new android.text.style.TypefaceSpan("sans-serif-medium"), 0, vol.length(), 33);
+        sub.append("  ");
+      }
+      sub.append(status);
+      covers.add(new CoverItem(b, display, sub, Library.external(b)));
     }
     coverGrid(pane, covers, true);
   }
@@ -2377,10 +2415,16 @@ public final class Main extends Activity {
   void addMenu() {
     choices(
         "책 추가",
-        new String[] {"기기 폴더 연결", "ZIP · CBZ 파일 선택", "Windows 공유 폴더 연결"},
+        new String[] {
+          "기기 폴더 연결", "ZIP · CBZ 파일 선택", "Windows 공유 폴더 연결", "PC 원격 폴더 연결 (외부에서도)"
+        },
         i -> {
           if (i == 2) {
             smb();
+            return;
+          }
+          if (i == 3) {
+            remote();
             return;
           }
           Intent in =
@@ -2457,6 +2501,57 @@ public final class Main extends Activity {
               } catch (Exception ex) {
                 alert("연결 실패", Library.reason(ex));
               }
+            })
+        .setNegativeButton("취소", null)
+        .show();
+  }
+
+  /** PC 원격 폴더(WebDAV): 주소·계정·비밀번호. 주소 칸에 https://계정:비밀번호@주소 형태의 연결 코드를 붙여도 된다. */
+  void remote() {
+    LinearLayout box = col();
+    pad(box, 22, 8);
+    String[] hints = {"주소 또는 연결 코드 (https://…/ccomics/)", "계정", "비밀번호"};
+    EditText[] e = new EditText[3];
+    for (int i = 0; i < 3; i++) {
+      e[i] = new EditText(this);
+      e[i].setSingleLine();
+      e[i].setHint(hints[i]);
+      box.addView(e[i]);
+    }
+    e[2].setInputType(129);
+    dialog()
+        .setTitle("PC 원격 폴더")
+        .setView(box)
+        .setPositiveButton(
+            "연결",
+            (d, w) -> {
+              String address = e[0].getText().toString().trim();
+              String user = e[1].getText().toString().trim(), pass = e[2].getText().toString();
+              okhttp3.HttpUrl u = okhttp3.HttpUrl.parse(address);
+              if (u == null || !u.isHttps()) {
+                alert("주소 확인", "https://로 시작하는 PC 원격 폴더 주소나 연결 코드를 붙여 넣으세요.");
+                return;
+              }
+              if (!u.username().isEmpty()) {
+                user = u.username();
+                pass = u.password();
+                u = u.newBuilder().username("").password("").build();
+              }
+              String url = u.toString();
+              if (!url.endsWith("/")) url += "/";
+              String fu = url, fuser = user, fpass = pass;
+              new Thread(
+                  () -> {
+                    try {
+                      WebDav.list(fu, WebDav.auth(fuser, fpass));
+                      long id = db.register(fu, fuser, fpass);
+                      db.reconnect(id);
+                      runOnUiThread(() -> scan(Collections.singletonList(id)));
+                    } catch (Exception ex) {
+                      runOnUiThread(() -> alert("연결 실패", Library.reason(ex)));
+                    }
+                  })
+                  .start();
             })
         .setNegativeButton("취소", null)
         .show();

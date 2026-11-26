@@ -914,7 +914,12 @@ final class Order {
     if (parent == null || parent.isEmpty() || "single".equals(parent)) return "";
     String decoded = percentDecode(parent).replace('\\', '/');
     String pathPart = decoded;
-    if (pathPart.startsWith("smb://")) {
+    if (pathPart.startsWith("https://") || pathPart.startsWith("http://")) {
+      // PC 원격 폴더: 주소·서버 경로(/ccomics)를 떼고 공유한 폴더 이름부터 본다.
+      int s1 = pathPart.indexOf('/', pathPart.indexOf("://") + 3);
+      int s2 = s1 >= 0 ? pathPart.indexOf('/', s1 + 1) : -1;
+      pathPart = s2 >= 0 ? pathPart.substring(s2 + 1) : "";
+    } else if (pathPart.startsWith("smb://")) {
       int s1 = pathPart.indexOf('/', 6);
       int s2 = s1 >= 0 ? pathPart.indexOf('/', s1 + 1) : -1;
       pathPart = s2 >= 0 ? pathPart.substring(s2 + 1) : "";
@@ -1040,6 +1045,16 @@ final class Order {
    * 만화명이 "나루토"이면 "[원본] 나루토 1권", "나루토01권", "나루토001권" 등을
    * "나루토 1권", "나루토 2권", ..., "나루토 10권", ..., "나루토 100권" 형태로 통일한다.
    */
+  /** 상세 책장 아래 줄에 쓸 권 표기(예: 1권, 상권, 3화). 없으면 빈 문자열. */
+  static String volumeLabel(String rawTitle, String comicNumber) {
+    Volume v = volume(rawTitle);
+    String numText = normalizeNumberText(comicNumber);
+    if (numText.isEmpty() && v.number >= 0) numText = v.numberText;
+    if (!numText.isEmpty()) return numText + ("화".equals(v.unit) ? "화" : "권");
+    if (!v.partLabel.isEmpty()) return v.partLabel + "권";
+    return "";
+  }
+
   static String volumeDisplayTitle(
       String seriesTitle, String rawTitle, String comicNumber, boolean hideTags) {
     if (!hideTags) return rawTitle;

@@ -188,6 +188,7 @@ final class Library extends SQLiteOpenHelper {
   }
 
   synchronized void reconnect(long id) {
+    httpAuths.remove(id);
     CIFSContext old = sessions.remove(id);
     if (old != null)
       try {
@@ -196,7 +197,30 @@ final class Library extends SQLiteOpenHelper {
       }
   }
 
+  final Map<Long, String> httpAuths = new HashMap<>();
+
+  /** PC 원격 폴더(WebDAV) 접속용 인증 헤더. */
+  synchronized String httpAuth(long id) throws Exception {
+    String a = httpAuths.get(id);
+    if (a == null) {
+      try (Cursor c =
+          getReadableDatabase()
+              .rawQuery("SELECT user,secret FROM sources WHERE id=?", new String[] {"" + id})) {
+        if (!c.moveToFirst()) throw new IOException("연결 정보가 없습니다.");
+        a = WebDav.auth(c.getString(0), decrypt(c.getString(1)));
+        httpAuths.put(id, a);
+      }
+    }
+    return a;
+  }
+
+  /** 기기 밖(Windows 공유·PC 원격 폴더)에서 읽는 책인지. */
+  static boolean external(Book b) {
+    return b.url.startsWith("smb://") || WebDav.isUrl(b.url);
+  }
+
   Archive open(Book b) throws Exception {
+    if (WebDav.isUrl(b.url)) return new Archive(ctx, b.url, null, httpAuth(b.source));
     return new Archive(ctx, b.url, b.url.startsWith("smb://") ? session(b.source) : null);
   }
 
@@ -243,7 +267,20 @@ final class Library extends SQLiteOpenHelper {
       for (String id : strings("SELECT id FROM books WHERE source=?", "" + source))
         coverFile(Long.parseLong(id)).delete();
     IndexBatch batch = new IndexBatch(source, token, pending);
-    if (url.startsWith("smb://")) {
+    if (WebDav.isUrl(url)) {
+      String auth = httpAuth(source);
+      ArrayDeque<String> dirs = new ArrayDeque<>();
+      dirs.add(url);
+      HashSet<String> visited = new HashSet<>();
+      while (!dirs.isEmpty()) {
+        String parent = dirs.remove();
+        if (!visited.add(parent)) continue;
+        for (WebDav.Entry e : WebDav.list(parent, auth)) {
+          if (e.dir) dirs.add(e.url.endsWith("/") ? e.url : e.url + "/");
+          else batch.add(e.url, e.name, parent, e.size, e.modified);
+        }
+      }
+    } else if (url.startsWith("smb://")) {
       CIFSContext smb = session(source);
       ArrayDeque<String> dirs = new ArrayDeque<>();
       dirs.add(url);

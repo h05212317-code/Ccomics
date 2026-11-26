@@ -367,12 +367,17 @@ final class Archive implements Closeable {
   }
 
   Archive(Context ctx, String address, CIFSContext server) throws Exception {
+    this(ctx, address, server, "");
+  }
+
+  Archive(Context ctx, String address, CIFSContext server, String httpAuth) throws Exception {
     SeekableByteChannel channel;
     File temp = null;
     int split = address.indexOf(NESTED);
     String entry = split < 0 ? null : address.substring(split + 1);
     if (split >= 0) address = address.substring(0, split);
     if (address.startsWith("smb://")) channel = new RemoteChannel(new SmbFile(address, server));
+    else if (WebDav.isUrl(address)) channel = new WebDav.Channel(address, httpAuth);
     else {
       Uri uri = Uri.parse(address);
       ParcelFileDescriptor pfd = ctx.getContentResolver().openFileDescriptor(uri, "r");

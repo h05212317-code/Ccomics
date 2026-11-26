@@ -2,7 +2,7 @@ plugins { id 'com.android.application' version '8.7.3' }
 android {
     namespace 'kr.ccomics'
     compileSdk 35
-    defaultConfig { applicationId 'kr.ccomics'; minSdk 28; targetSdk 35; versionCode 25; versionName '1.0.24' }
+    defaultConfig { applicationId 'kr.ccomics'; minSdk 28; targetSdk 35; versionCode 26; versionName '1.0.25' }
     compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
     testOptions {
         unitTests.includeAndroidResources = true
@@ -18,7 +18,9 @@ dependencies {
     implementation 'androidx.core:core:1.13.1'
     implementation 'org.apache.commons:commons-compress:1.26.2'
     implementation 'eu.agno3.jcifs:jcifs-ng:2.1.10'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     implementation 'org.slf4j:slf4j-nop:1.7.36'
     testImplementation 'org.robolectric:robolectric:4.16.1'
     testImplementation 'junit:junit:4.13.2'
+    testImplementation 'com.squareup.okhttp3:mockwebserver:4.12.0'
 }
