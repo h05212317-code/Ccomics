@@ -410,6 +410,39 @@ public final class Main extends Activity {
     return SORT_NAMES[idx] + " " + (desc ? "↓" : "↑");
   }
 
+  /** 받아 둔 PC 원격 책(오프라인으로 읽을 수 있는 저장본)의 용량을 보여 주고 지운다. */
+  void remoteStorage() {
+    long[] u = RemoteBooks.usage(this);
+    String size =
+        u[1] >= (1L << 30)
+            ? String.format(Locale.KOREA, "%.1fGB", u[1] / (double) (1L << 30))
+            : (u[1] >> 20) + "MB";
+    dialog()
+        .setTitle("PC 원격 보관함")
+        .setMessage(
+            "받아 둔 책 "
+                + u[0]
+                + "권 · "
+                + size
+                + "\n\n받아 둔 책은 PC가 꺼져 있거나 인터넷이 없어도 열립니다. 지우기 전까지 계속 보관됩니다.")
+        .setPositiveButton(
+            "모두 지우기",
+            (d, w) ->
+                dialog()
+                    .setTitle("보관함 비우기")
+                    .setMessage(u[0] + "권(" + size + ")을 휴대폰에서 지웁니다. 다시 읽으려면 PC에서 다시 받아야 합니다.")
+                    .setPositiveButton(
+                        "지우기",
+                        (d2, w2) -> {
+                          RemoteBooks.clear(this);
+                          toast("PC 원격 보관함을 비웠습니다.");
+                        })
+                    .setNegativeButton("취소", null)
+                    .show())
+        .setNegativeButton("닫기", null)
+        .show();
+  }
+
   /** PC 원격 폴더 사용 여부. 끄면 원격 책을 책장에서 숨기고 새로고침 때 연결하지 않는다. */
   boolean remoteOn() {
     return prefs.getBoolean("remoteOn", true);
@@ -2628,7 +2661,8 @@ public final class Main extends Activity {
           "앱 업데이트 확인",
           "책 이름만 표시 · " + (prefs.getBoolean("hideVolumeTags", true) ? "켜짐" : "꺼짐"),
           "작품 수 표시 · " + (showShelfCount() ? "켜짐" : "꺼짐"),
-          "PC 원격 폴더 · " + (remoteOn() ? "켜짐" : "꺼짐")
+          "PC 원격 폴더 · " + (remoteOn() ? "켜짐" : "꺼짐"),
+          "PC 원격 보관함 관리"
         },
         i -> {
           if (i == 0) refreshSources(false);
@@ -2663,6 +2697,7 @@ public final class Main extends Activity {
             renderNow(true);
             toast(next ? "책장에 작품 수를 표시합니다." : "책장에서 작품 수를 숨깁니다.");
           }
+          if (i == 11) remoteStorage();
           if (i == 10) {
             boolean next = !remoteOn();
             prefs.edit().putBoolean("remoteOn", next).apply();
@@ -3019,8 +3054,34 @@ public final class Main extends Activity {
     readerIO.execute(
         () -> {
           try {
+            if (WebDav.isUrl(b.url) && !RemoteBooks.has(this, b.url)) {
+              // PC 원격 책은 처음 열 때 권 전체를 받아 보관함에 저장한 뒤 연다(이후 오프라인으로도 열림).
+              RemoteBooks.download(
+                  this,
+                  b.url,
+                  db.httpAuth(b.source),
+                  new RemoteBooks.Progress() {
+                    public void update(long done, long total) {
+                      runOnUiThread(
+                          () -> {
+                            if (token != requestId || isDestroyed()) return;
+                            scanMessage =
+                                String.format(
+                                    Locale.KOREA,
+                                    "PC에서 받는 중 %d%%  ·  %d / %dMB",
+                                    total > 0 ? done * 100 / total : 0,
+                                    done >> 20,
+                                    total >> 20);
+                            updateScanBanner();
+                          });
+                    }
+
+                    public boolean cancelled() {
+                      return token != requestId || isDestroyed();
+                    }
+                  });
+            }
             Archive a = db.open(b);
-            if (a.remote != null) a.remote.streamAhead();
             if (a.comicInfo != null && b.comicSeries.isEmpty() && b.comicNumber.isEmpty()) {
               db.applyComicInfo(b, a);
               b.comicSeries = a.comicInfo.series;

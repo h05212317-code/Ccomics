@@ -124,8 +124,12 @@ final class WebDav {
   }
 
   static Response call(Request req) throws IOException {
+    return call(CLIENT, req);
+  }
+
+  static Response call(OkHttpClient client, Request req) throws IOException {
     try {
-      return CLIENT.newCall(req).execute();
+      return client.newCall(req).execute();
     } catch (UnknownHostException | ConnectException | SocketTimeoutException e) {
       throw new IOException("PC에 연결할 수 없습니다. PC 전원과 Ccomics PC 서버 실행을 확인하세요.");
     }

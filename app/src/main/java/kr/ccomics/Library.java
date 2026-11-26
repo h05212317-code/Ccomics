@@ -220,7 +220,11 @@ final class Library extends SQLiteOpenHelper {
   }
 
   Archive open(Book b) throws Exception {
-    if (WebDav.isUrl(b.url)) return new Archive(ctx, b.url, null, httpAuth(b.source));
+    if (WebDav.isUrl(b.url)) {
+      // 보관함에 받아 둔 권은 PC·네트워크 없이 저장본으로 연다.
+      if (RemoteBooks.has(ctx, b.url)) return new Archive(ctx, RemoteBooks.localAddress(ctx, b.url), null);
+      return new Archive(ctx, b.url, null, httpAuth(b.source));
+    }
     return new Archive(ctx, b.url, b.url.startsWith("smb://") ? session(b.source) : null);
   }
 
