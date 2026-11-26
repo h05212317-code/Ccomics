@@ -339,7 +339,7 @@ final class WebDav {
           start = closed ? -1 : next();
           if (start < 0) {
             worker = null;
-            save();
+            if (!closed) save();
             notifyAll();
             return;
           }
@@ -392,7 +392,7 @@ final class WebDav {
                       ? new IOException("PC에 연결할 수 없습니다. PC 전원과 Ccomics PC 서버 실행을 확인하세요.")
                       : e;
               worker = null;
-              save();
+              if (!closed) save();
               notifyAll();
               return;
             }
@@ -416,22 +416,30 @@ final class WebDav {
     }
 
     void release() {
+      // 같은 책을 곧바로 다시 열어도 기록이 다 남은 뒤 열리도록 정리 전체를 OPEN 잠금 안에서 한다.
       synchronized (OPEN) {
         if (--refs > 0) return;
         OPEN.remove(key);
-      }
-      Call c;
-      synchronized (this) {
-        closed = true;
-        c = call;
-        notifyAll();
-      }
-      if (c != null) c.cancel();
-      synchronized (this) {
-        save();
-        try {
-          raf.close();
-        } catch (IOException ignored) {
+        Call c;
+        Thread w;
+        synchronized (this) {
+          closed = true;
+          c = call;
+          w = worker;
+          notifyAll();
+        }
+        if (c != null) c.cancel();
+        if (w != null && w != Thread.currentThread())
+          try {
+            w.join(5000);
+          } catch (InterruptedException ignored) {
+          }
+        synchronized (this) {
+          save();
+          try {
+            raf.close();
+          } catch (IOException ignored) {
+          }
         }
       }
     }
@@ -489,7 +497,10 @@ final class WebDav {
     public void close() {
       if (!open) return;
       open = false;
-      cache.release();
+      // 받던 요청을 끊고 기다리는 정리는 화면을 멈추지 않도록 따로 한다.
+      Thread t = new Thread(cache::release, "ccomics-remote-close");
+      t.setDaemon(true);
+      t.start();
     }
   }
 }

@@ -107,10 +107,15 @@ public class WebDavTest {
         }
         assertEquals(a.remote.chunks, a.remote.have.cardinality());
       }
-      byte[] cached = java.nio.file.Files.readAllBytes(
-          new File(WebDav.Cache.dir(ctx), WebDav.Cache.OPEN.isEmpty()
-              ? new File(WebDav.Cache.dir(ctx).list((d, n) -> n.endsWith(".part"))[0]).getName()
-              : "").toPath());
+      for (int k = 0; k < 100; k++) {
+        synchronized (WebDav.Cache.OPEN) {
+          if (WebDav.Cache.OPEN.isEmpty()) break;
+        }
+        Thread.sleep(50);
+      }
+      String key = Integer.toHexString(f.url.hashCode()) + "-" + Integer.toHexString(f.url.length());
+      byte[] cached =
+          java.nio.file.Files.readAllBytes(new File(WebDav.Cache.dir(ctx), key + ".part").toPath());
       assertArrayEquals(bytes, cached);
       try (Archive a = new Archive(ctx, f.url, null, auth)) {
         assertEquals(a.remote.chunks, a.remote.have.cardinality());
