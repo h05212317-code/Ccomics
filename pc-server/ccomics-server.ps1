@@ -49,6 +49,8 @@ while ($true) {
     --addr "127.0.0.1:$($cfg.port)" `
     --baseurl /ccomics `
     --read-only `
+    --include '*.{zip,cbz}' `
+    --ignore-case `
     --dir-cache-time 30s `
     --poll-interval 0 `
     --log-file (Join-Path $dir 'server.log') `
