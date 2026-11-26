@@ -3054,7 +3054,12 @@ public final class Main extends Activity {
     readerIO.execute(
         () -> {
           try {
-            if (WebDav.isUrl(b.url) && !RemoteBooks.has(this, b.url)) {
+            boolean fetching = WebDav.isUrl(b.url) && !RemoteBooks.has(this, b.url);
+            // 받는 동안 화면이 꺼져 연결이 끊기지 않게 한다.
+            if (fetching)
+              runOnUiThread(
+                  () -> getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
+            if (fetching) {
               // PC 원격 책은 처음 열 때 권 전체를 받아 보관함에 저장한 뒤 연다(이후 오프라인으로도 열림).
               RemoteBooks.download(
                   this,
@@ -3124,8 +3129,18 @@ public final class Main extends Activity {
                   loadingBook = false;
                   scanMessage = "";
                   updateScanBanner();
-                  alert("책을 열 수 없습니다", Library.reason(e));
+                  if (e instanceof RemoteBooks.Incomplete) {
+                    RemoteBooks.Incomplete x = (RemoteBooks.Incomplete) e;
+                    alert(
+                        "받기가 중간에 끊겼습니다",
+                        (x.total > 0 ? x.done * 100 / x.total : 0)
+                            + "%까지 휴대폰에 저장했습니다. 책을 다시 누르면 이어서 받습니다.\n\n원인: "
+                            + Library.reason(e));
+                  } else alert("책을 열 수 없습니다", Library.reason(e));
                 });
+          } finally {
+            runOnUiThread(
+                () -> getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
           }
         });
   }

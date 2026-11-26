@@ -35,12 +35,20 @@ $env:RCLONE_CONFIG_CCOMICSLIB_UPSTREAMS = ($upstreams -join ' ')
 $env:RCLONE_USER = $cfg.user
 $env:RCLONE_PASS = $cfg.pass
 
-& $rclone serve webdav 'ccomicslib:' `
-  --config /notfound `
-  --addr "127.0.0.1:$($cfg.port)" `
-  --baseurl /ccomics `
-  --read-only `
-  --dir-cache-time 30s `
-  --poll-interval 0 `
-  --log-file (Join-Path $dir 'server.log') `
-  --log-level $LogLevel
+# 이미 실행 중이면(포트 사용 중) 두 번 띄우지 않습니다.
+if (Get-NetTCPConnection -State Listen -LocalPort $cfg.port -ErrorAction SilentlyContinue) { return }
+
+# rclone이 꺼지거나(드라이브가 아직 안 붙은 부팅 직후 등) 실패하면 10초 뒤 다시 띄웁니다.
+$ErrorActionPreference = 'Continue'
+while ($true) {
+  & $rclone serve webdav 'ccomicslib:' `
+    --config /notfound `
+    --addr "127.0.0.1:$($cfg.port)" `
+    --baseurl /ccomics `
+    --read-only `
+    --dir-cache-time 30s `
+    --poll-interval 0 `
+    --log-file (Join-Path $dir 'server.log') `
+    --log-level $LogLevel
+  Start-Sleep -Seconds 10
+}

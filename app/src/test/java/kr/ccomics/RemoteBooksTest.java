@@ -134,7 +134,82 @@ public class RemoteBooksTest {
     } finally {
       s.shutdown();
     }
+    // 취소해도 받은 조각은 남고, 다시 받으면 나머지만 받아 완성한다.
     assertFalse(RemoteBooks.has(ctx, url));
-    assertFalse(new File(RemoteBooks.file(ctx, url).getPath() + ".part").exists());
+    assertTrue(new File(RemoteBooks.file(ctx, url).getPath() + ".part").exists());
+  }
+
+  @Test
+  public void survivesDroppedConnectionsAndResumesAfterServerOutage() throws Exception {
+    byte[] bytes = new byte[18_000_000];
+    new Random(5).nextBytes(bytes);
+    AtomicInteger calls = new AtomicInteger();
+    java.util.concurrent.atomic.AtomicBoolean down = new java.util.concurrent.atomic.AtomicBoolean();
+    java.util.concurrent.atomic.AtomicLong served = new java.util.concurrent.atomic.AtomicLong();
+    MockWebServer s = new MockWebServer();
+    s.setDispatcher(
+        new Dispatcher() {
+          public MockResponse dispatch(RecordedRequest r) {
+            int n = calls.incrementAndGet();
+            if (down.get()) return new MockResponse().setResponseCode(502);
+            MockResponse res = range(bytes, r, 200_000);
+            // 휴대폰 망처럼 세 번에 한 번은 본문 도중 연결이 끊긴다.
+            if (n % 3 == 0) res.setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY);
+            else {
+              Matcher m = Pattern.compile("bytes=([0-9]+)-([0-9]+)").matcher(r.getHeader("Range"));
+              m.matches();
+              served.addAndGet(Math.min(bytes.length - 1, Long.parseLong(m.group(2))) - Long.parseLong(m.group(1)) + 1);
+            }
+            return res;
+          }
+        });
+    s.start();
+    Context ctx = RuntimeEnvironment.getApplication();
+    RemoteBooks.clear(ctx);
+    String url = s.url("/ccomics/flaky.zip").toString();
+    try {
+      // 1) 연결이 자주 끊겨도 끝까지 받는다.
+      File f = RemoteBooks.download(ctx, url, "", quiet());
+      assertArrayEquals(bytes, java.nio.file.Files.readAllBytes(f.toPath()));
+      // 2) 받는 도중 PC가 꺼지면(502) 받은 만큼 남기고 Incomplete, 다시 켜지면 나머지만 받는다.
+      RemoteBooks.clear(ctx);
+      long[] seen = new long[1];
+      try {
+        RemoteBooks.download(
+            ctx,
+            url,
+            "",
+            new RemoteBooks.Progress() {
+              public void update(long done, long total) {
+                seen[0] = done;
+                if (done > total / 3) down.set(true);
+              }
+
+              public boolean cancelled() {
+                return false;
+              }
+            });
+        fail();
+      } catch (RemoteBooks.Incomplete e) {
+        assertTrue(e.done > 0);
+      }
+      down.set(false);
+      served.set(0);
+      File again = RemoteBooks.download(ctx, url, "", quiet());
+      assertArrayEquals(bytes, java.nio.file.Files.readAllBytes(again.toPath()));
+      assertTrue("resumed bytes " + served.get(), served.get() < bytes.length);
+    } finally {
+      s.shutdown();
+    }
+  }
+
+  static RemoteBooks.Progress quiet() {
+    return new RemoteBooks.Progress() {
+      public void update(long done, long total) {}
+
+      public boolean cancelled() {
+        return false;
+      }
+    };
   }
 }
