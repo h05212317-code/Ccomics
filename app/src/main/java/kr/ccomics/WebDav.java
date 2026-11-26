@@ -145,7 +145,7 @@ final class WebDav {
    * 받아 두고(streamAhead), 받은 조각은 캐시 파일에 남겨 다시 열 때 바로 읽는다. 같은 파일은 하나를 함께 쓴다.
    */
   static final class Cache implements Runnable {
-    static final int CHUNK = 256 << 10, LOOK = 4, JUMP = 24;
+    static final int CHUNK = 64 << 10, LOOK = 8;
     static final long BUDGET = 1536L << 20;
     static final Map<String, Cache> OPEN = new HashMap<>();
 
@@ -319,33 +319,59 @@ final class WebDav {
       return n;
     }
 
-    /** 지금 받아야 할 첫 조각. 없으면 -1. */
-    private synchronized int next() {
-      int from = Math.max(0, want);
-      int c = have.nextClearBit(from);
-      if (c < chunks && (stream || c < from + LOOK)) return c;
-      if (stream) {
-        c = have.nextClearBit(0);
-        if (c < chunks) return c;
+    /** 읽는 순서대로 곧 볼 페이지들의 조각 범위(Mihon·Komga 클라이언트처럼 페이지 순서로 미리 받기). */
+    final List<int[]> ahead = new ArrayList<>();
+
+    synchronized void prefetch(List<long[]> ranges) {
+      ahead.clear();
+      for (long[] r : ranges) {
+        long a = Math.max(0, r[0]), b = Math.min(length, r[1]);
+        if (b > a) ahead.add(new int[] {(int) (a / CHUNK), (int) ((b - 1) / CHUNK)});
       }
-      return -1;
+      notifyAll();
+      ensureWorker();
+    }
+
+    private int span(int from, int last) {
+      int e = from;
+      while (e + 1 <= last && e + 1 < chunks && !have.get(e + 1)) e++;
+      return e;
+    }
+
+    /** 다음에 받을 {첫 조각, 끝 조각, 우선순위}. 0=지금 읽는 곳, 1=곧 볼 페이지, 2=남는 시간에 나머지. */
+    private synchronized int[] pick() {
+      if (want >= 0 && want < chunks && !have.get(want)) {
+        int last = want + LOOK - 1;
+        for (int[] r : ahead) if (want >= r[0] && want <= r[1]) last = Math.max(last, r[1]);
+        return new int[] {want, span(want, last), 0};
+      }
+      for (int[] r : ahead) {
+        int c = have.nextClearBit(r[0]);
+        if (c <= r[1] && c < chunks) return new int[] {c, span(c, r[1]), 1};
+      }
+      if (stream) {
+        int c = have.nextClearBit(Math.max(0, want));
+        if (c >= chunks) c = have.nextClearBit(0);
+        if (c < chunks) return new int[] {c, span(c, chunks - 1), 2};
+      }
+      return null;
     }
 
     public void run() {
       int failures = 0;
       while (true) {
-        int start, end;
+        int start, end, level;
         synchronized (this) {
-          start = closed ? -1 : next();
-          if (start < 0) {
+          int[] p = closed ? null : pick();
+          if (p == null) {
             worker = null;
             if (!closed) save();
             notifyAll();
             return;
           }
-          int limit = Math.min(chunks, stream ? chunks : start + LOOK);
-          end = start;
-          while (end + 1 < limit && !have.get(end + 1)) end++;
+          start = p[0];
+          end = p[1];
+          level = p[2];
         }
         Request.Builder req =
             new Request.Builder()
@@ -376,8 +402,9 @@ final class WebDav {
               raf.write(buf, 0, size);
               have.set(c);
               notifyAll();
-              // 읽는 위치가 받는 구간에서 멀리 벗어나면(건너뛰기) 그 위치부터 다시 받는다.
-              if (want >= 0 && !have.get(want) && (want < c || want > c + JUMP)) break;
+              // 더 급한 조각(지금 읽는 곳·곧 볼 페이지)이 이 요청 뒤쪽에 없으면 끊고 그쪽부터 받는다.
+              int[] p = pick();
+              if (p != null && p[2] < level && !(p[0] > c && p[0] <= end)) break;
             }
           }
         } catch (IOException e) {

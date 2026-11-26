@@ -538,7 +538,20 @@ final class Archive implements Closeable {
     return android.util.Base64.encodeToString(digest.digest(), 2);
   }
 
+  /** PC 원격 책: 이 페이지부터 읽는 순서대로 몇 장을 미리 받게 한다(ZIP 안 저장 순서와 무관). */
+  void prefetch(int from, int count) {
+    if (remote == null || outer != null) return;
+    List<long[]> ranges = new ArrayList<>(count);
+    for (int k = Math.max(0, from); k < Math.min(pages.size(), from + count); k++) {
+      ZipArchiveEntry e = pages.get(k);
+      long start = e.getLocalHeaderOffset();
+      ranges.add(new long[] {start, start + 30 + e.getRawName().length + 512 + e.getCompressedSize()});
+    }
+    remote.prefetch(ranges);
+  }
+
   Bitmap decode(int i, int width, int height) throws IOException {
+    prefetch(i, 8);
     ZipArchiveEntry e = pages.get(i);
     if (!zip.canReadEntryData(e)) throw new IOException("암호화 또는 지원하지 않는 ZIP 압축 방식입니다.");
     if (e.getSize() < 1 || e.getSize() > MAX_PAGE) throw new IOException("이미지 파일 크기를 읽을 수 없습니다.");

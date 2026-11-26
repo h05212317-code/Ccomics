@@ -2,7 +2,7 @@
 # 외부 접속은 Tailscale Funnel의 /ccomics 경로가 이 포트로 넘겨 줍니다.
 # 설정: %APPDATA%\CcomicsServer\config.json  (folders, user, pass, port)
 # rclone 설정 파일(구글 드라이브 등)은 읽지도 바꾸지도 않습니다(--config 미사용, 환경 변수로만 원격 정의).
-param([switch]$Init)
+param([switch]$Init, [string]$LogLevel = 'NOTICE')
 
 $ErrorActionPreference = 'Stop'
 $dir = Join-Path $env:APPDATA 'CcomicsServer'
@@ -43,4 +43,4 @@ $env:RCLONE_PASS = $cfg.pass
   --dir-cache-time 30s `
   --poll-interval 0 `
   --log-file (Join-Path $dir 'server.log') `
-  --log-level NOTICE
+  --log-level $LogLevel
