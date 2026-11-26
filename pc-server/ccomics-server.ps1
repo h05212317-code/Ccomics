@@ -1,11 +1,11 @@
 ﻿# Ccomics PC 서버: 지정한 폴더들을 읽기 전용 WebDAV로 127.0.0.1에만 엽니다.
 # 외부 접속은 Tailscale Funnel의 /ccomics 경로가 이 포트로 넘겨 줍니다.
-# 설정: %APPDATA%\CcomicsServer\config.json  (folders, user, pass, port)
+# 설정: 이 폴더의 data\config.json  (folders, user, pass, port) — 비밀번호가 있어 git에 올리지 않음
 # rclone 설정 파일(구글 드라이브 등)은 읽지도 바꾸지도 않습니다(--config 미사용, 환경 변수로만 원격 정의).
 param([switch]$Init, [string]$LogLevel = 'NOTICE')
 
 $ErrorActionPreference = 'Stop'
-$dir = Join-Path $env:APPDATA 'CcomicsServer'
+$dir = Join-Path $PSScriptRoot 'data'
 $configPath = Join-Path $dir 'config.json'
 $rclone = 'C:\Programs\rclone-v1.76.0-windows-amd64\rclone.exe'
 New-Item -ItemType Directory -Force $dir | Out-Null
@@ -34,6 +34,9 @@ $env:RCLONE_CONFIG_CCOMICSLIB_TYPE = 'combine'
 $env:RCLONE_CONFIG_CCOMICSLIB_UPSTREAMS = ($upstreams -join ' ')
 $env:RCLONE_USER = $cfg.user
 $env:RCLONE_PASS = $cfg.pass
+
+"$(Get-Date -Format s) 시작: 폴더=$($env:RCLONE_CONFIG_CCOMICSLIB_UPSTREAMS)" |
+  Out-File -Append -Encoding utf8 (Join-Path $dir 'launcher.log')
 
 # 이미 실행 중이면(포트 사용 중) 두 번 띄우지 않습니다.
 if (Get-NetTCPConnection -State Listen -LocalPort $cfg.port -ErrorAction SilentlyContinue) { return }

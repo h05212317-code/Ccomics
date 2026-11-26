@@ -10,3 +10,4 @@
 *.jks
 *.keystore
 *.p12
+/pc-server/data/
