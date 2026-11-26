@@ -16,6 +16,8 @@ import org.apache.commons.compress.archivers.zip.*;
 
 final class Archive implements Closeable {
   ZipFile zip;
+  /** PC 원격 폴더 책이면 그 파일의 보관본(읽기 화면에서 미리 받기 시작용). */
+  WebDav.Cache remote;
   final List<ZipArchiveEntry> pages = new ArrayList<>();
   final File spool;
   static final long MAX_PAGE = 128L << 20;
@@ -377,7 +379,11 @@ final class Archive implements Closeable {
     String entry = split < 0 ? null : address.substring(split + 1);
     if (split >= 0) address = address.substring(0, split);
     if (address.startsWith("smb://")) channel = new RemoteChannel(new SmbFile(address, server));
-    else if (WebDav.isUrl(address)) channel = new WebDav.Channel(address, httpAuth);
+    else if (WebDav.isUrl(address)) {
+      WebDav.Channel web = new WebDav.Channel(ctx, address, httpAuth);
+      remote = web.cache;
+      channel = web;
+    }
     else {
       Uri uri = Uri.parse(address);
       ParcelFileDescriptor pfd = ctx.getContentResolver().openFileDescriptor(uri, "r");

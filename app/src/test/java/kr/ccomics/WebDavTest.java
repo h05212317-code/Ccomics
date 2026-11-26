@@ -95,6 +95,29 @@ public class WebDavTest {
             assertEquals(i + 1, in.read());
           }
       }
+      // 읽기 화면처럼 미리 받기를 켜면 파일 전체가 보관본에 차고, 다시 열면 같은 내용을 읽는다.
+      try (Archive a = new Archive(ctx, f.url, null, auth)) {
+        a.remote.streamAhead();
+        long until = System.currentTimeMillis() + 20000;
+        while (System.currentTimeMillis() < until) {
+          synchronized (a.remote) {
+            if (a.remote.have.cardinality() == a.remote.chunks) break;
+          }
+          Thread.sleep(50);
+        }
+        assertEquals(a.remote.chunks, a.remote.have.cardinality());
+      }
+      byte[] cached = java.nio.file.Files.readAllBytes(
+          new File(WebDav.Cache.dir(ctx), WebDav.Cache.OPEN.isEmpty()
+              ? new File(WebDav.Cache.dir(ctx).list((d, n) -> n.endsWith(".part"))[0]).getName()
+              : "").toPath());
+      assertArrayEquals(bytes, cached);
+      try (Archive a = new Archive(ctx, f.url, null, auth)) {
+        assertEquals(a.remote.chunks, a.remote.have.cardinality());
+        try (InputStream in = a.zip.getInputStream(a.pages.get(4))) {
+          assertEquals(5, in.read());
+        }
+      }
       try {
         WebDav.list(root, WebDav.auth("ccomics", "wrong"));
         fail();

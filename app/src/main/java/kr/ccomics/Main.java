@@ -410,6 +410,11 @@ public final class Main extends Activity {
     return SORT_NAMES[idx] + " " + (desc ? "↓" : "↑");
   }
 
+  /** PC 원격 폴더 사용 여부. 끄면 원격 책을 책장에서 숨기고 새로고침 때 연결하지 않는다. */
+  boolean remoteOn() {
+    return prefs.getBoolean("remoteOn", true);
+  }
+
   boolean showShelfCount() {
     return prefs.getBoolean("showShelfCount", false);
   }
@@ -834,6 +839,7 @@ public final class Main extends Activity {
     snapshots.execute(
         () -> {
           List<Library.Book> all = db.books();
+          if (!remoteOn()) all.removeIf(x -> WebDav.isUrl(x.url));
           Map<String, List<Library.Book>> sorted = new LinkedHashMap<>();
           for (int i = 0; i < all.size(); i++) {
             Library.Book b = all.get(i);
@@ -2567,7 +2573,7 @@ public final class Main extends Activity {
   boolean refreshSources(boolean pulled) {
     if (!scanning.isEmpty()) return false;
     List<Long> ids = new ArrayList<>();
-    for (String s : db.strings("SELECT id FROM sources")) ids.add(Long.valueOf(s));
+    for (String s : db.strings(remoteOn() ? "SELECT id FROM sources" : "SELECT id FROM sources WHERE url NOT LIKE 'http%'")) ids.add(Long.valueOf(s));
     if (ids.isEmpty()) {
       if (pulled) toast("연결된 폴더가 없습니다.");
       else addMenu();
@@ -2621,7 +2627,8 @@ public final class Main extends Activity {
           "임시 파일 정리",
           "앱 업데이트 확인",
           "책 이름만 표시 · " + (prefs.getBoolean("hideVolumeTags", true) ? "켜짐" : "꺼짐"),
-          "작품 수 표시 · " + (showShelfCount() ? "켜짐" : "꺼짐")
+          "작품 수 표시 · " + (showShelfCount() ? "켜짐" : "꺼짐"),
+          "PC 원격 폴더 · " + (remoteOn() ? "켜짐" : "꺼짐")
         },
         i -> {
           if (i == 0) refreshSources(false);
@@ -2656,10 +2663,19 @@ public final class Main extends Activity {
             renderNow(true);
             toast(next ? "책장에 작품 수를 표시합니다." : "책장에서 작품 수를 숨깁니다.");
           }
+          if (i == 10) {
+            boolean next = !remoteOn();
+            prefs.edit().putBoolean("remoteOn", next).apply();
+            selected = "";
+            renderNow(true);
+            if (next) refreshSources(false);
+            toast(next ? "PC 원격 폴더의 책을 함께 표시합니다." : "PC 원격 폴더의 책을 숨기고 연결하지 않습니다.");
+          }
           if (i == 6) {
             worker.execute(
                 () -> {
                   Archive.clearSpools(this);
+                  WebDav.Cache.clear(this);
                   coverCache.evictAll();
                   runOnUiThread(() -> toast("임시 파일을 정리했습니다."));
                 });
@@ -3004,6 +3020,7 @@ public final class Main extends Activity {
         () -> {
           try {
             Archive a = db.open(b);
+            if (a.remote != null) a.remote.streamAhead();
             if (a.comicInfo != null && b.comicSeries.isEmpty() && b.comicNumber.isEmpty()) {
               db.applyComicInfo(b, a);
               b.comicSeries = a.comicInfo.series;
