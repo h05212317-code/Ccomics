@@ -805,7 +805,7 @@ public final class Main extends Activity {
                     entry.fullTitle
                         + " ("
                         + RemoteBooks.formatSize(entry.item.bytes)
-                        + ")을 휴대폰 보관함에서 지웁니다.\n다시 읽으려면 PC에서 다시 받아야 합니다.")
+                        + ")을 휴대폰 보관함에서 지웁니다.\n다시 읽으려면 원격 폴더에서 다시 받아야 합니다.")
                 .setPositiveButton(
                     "삭제",
                     (d, w) -> {
@@ -967,7 +967,7 @@ public final class Main extends Activity {
           if (currentGroups.isEmpty()) {
             TextView empty =
                 label(
-                    "보관함에 저장된 원격 책이 없습니다.\nPC 원격 책을 열면 자동으로 이곳에 저장됩니다.",
+                    "보관함에 저장된 원격 책이 없습니다.\nPC·PikPak 원격 책을 열거나 미리 받으면 이곳에 저장됩니다.",
                     13,
                     muted,
                     false);
@@ -986,153 +986,100 @@ public final class Main extends Activity {
               listBox.addView(div, new LinearLayout.LayoutParams(-1, dp(1)));
             }
 
-            if (group.items.size() == 1) {
-              RemoteCacheEntry entry = group.items.get(0);
-              LinearLayout itemRow = row();
-              pad(itemRow, 0, 10);
-              itemRow.setMinimumHeight(dp(56));
+            boolean isExpanded = expanded.contains(group.grp);
+            LinearLayout headerRow = row();
+            pad(headerRow, 2, 10);
+            headerRow.setMinimumHeight(dp(58));
 
-              CheckBox cb = new CheckBox(builder.getContext());
-              cb.setChecked(checked.contains(entry.item.fileName));
-              cb.setOnCheckedChangeListener(
-                  (btn, isChecked) -> {
-                    if (isChecked) checked.add(entry.item.fileName);
-                    else checked.remove(entry.item.fileName);
-                    updateButtons.run();
-                  });
-              itemRow.addView(cb, new LinearLayout.LayoutParams(-2, -2));
+            ImageView thumb = new ImageView(this);
+            thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            thumb.setBackground(shape(surface, 4));
+            thumb.setClipToOutline(true);
+            if (group.coverBook != null) loadCover(thumb, group.coverBook);
+            else thumb.setImageResource(R.drawable.book_blank);
+            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(dp(34), dp(48));
+            tlp.rightMargin = dp(10);
+            headerRow.addView(thumb, tlp);
 
-              ImageView thumb = new ImageView(this);
-              thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
-              thumb.setBackground(shape(surface, 4));
-              thumb.setClipToOutline(true);
-              if (entry.primaryBook != null) loadCover(thumb, entry.primaryBook);
-              else thumb.setImageResource(R.drawable.book_blank);
-              LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(dp(34), dp(48));
-              tlp.rightMargin = dp(10);
-              itemRow.addView(thumb, tlp);
+            LinearLayout meta = col();
+            TextView titleView = label(group.title, 15, ink, true);
+            titleView.setMaxLines(2);
+            titleView.setEllipsize(TextUtils.TruncateAt.END);
+            meta.addView(titleView);
+            String subText =
+                group.items.size()
+                    + (group.orphan ? "개  ·  " : "권  ·  ")
+                    + RemoteBooks.formatSize(group.totalBytes)
+                    + (isExpanded ? "  ·  접기 ▴" : "  ·  목록 보기 ▾");
+            TextView subView = label(subText, 12, muted, false);
+            subView.setPadding(0, dp(3), 0, 0);
+            one(subView);
+            meta.addView(subView);
+            weight(headerRow, meta);
 
-              LinearLayout meta = col();
-              TextView titleView = label(entry.fullTitle, 14, ink, true);
-              titleView.setMaxLines(2);
-              titleView.setEllipsize(TextUtils.TruncateAt.END);
-              meta.addView(titleView);
-              TextView subView =
-                  label(
-                      entry.subtitle,
-                      12,
-                      !entry.item.complete || entry.missing || group.orphan ? danger : muted,
-                      false);
-              subView.setPadding(0, dp(3), 0, 0);
-              one(subView);
-              meta.addView(subView);
-              weight(itemRow, meta);
+            TextView clearGrpBtn = label("비우기", 13, danger, true);
+            pad(clearGrpBtn, 10, 10);
+            clearGrpBtn.setMinimumHeight(dp(44));
+            clearGrpBtn.setGravity(Gravity.CENTER);
+            clearGrpBtn.setOnClickListener(v -> confirmDeleteGroup.accept(group));
+            headerRow.addView(clearGrpBtn);
 
-              TextView delBtn = label("삭제", 13, danger, true);
-              pad(delBtn, 10, 10);
-              delBtn.setMinimumHeight(dp(44));
-              delBtn.setGravity(Gravity.CENTER);
-              delBtn.setOnClickListener(v -> confirmDeleteEntry.accept(entry));
-              itemRow.addView(delBtn);
+            headerRow.setOnClickListener(
+                v -> {
+                  if (expanded.contains(group.grp)) expanded.remove(group.grp);
+                  else expanded.add(group.grp);
+                  rebuildRef[0].run();
+                });
+            listBox.addView(headerRow, -1, -2);
 
-              itemRow.setOnClickListener(v -> cb.setChecked(!cb.isChecked()));
-              listBox.addView(itemRow, -1, -2);
-            } else {
-              boolean isExpanded = expanded.contains(group.grp);
-              LinearLayout headerRow = row();
-              pad(headerRow, 2, 10);
-              headerRow.setMinimumHeight(dp(58));
+            if (isExpanded) {
+              LinearLayout subList = col();
+              subList.setBackground(shape(surface, 8));
+              subList.setPadding(dp(6), dp(4), dp(4), dp(4));
+              LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-1, -2);
+              slp.bottomMargin = dp(8);
+              for (int ei = 0; ei < group.items.size(); ei++) {
+                RemoteCacheEntry entry = group.items.get(ei);
+                LinearLayout volRow = row();
+                pad(volRow, 2, 6);
+                volRow.setMinimumHeight(dp(46));
 
-              ImageView thumb = new ImageView(this);
-              thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
-              thumb.setBackground(shape(surface, 4));
-              thumb.setClipToOutline(true);
-              if (group.coverBook != null) loadCover(thumb, group.coverBook);
-              else thumb.setImageResource(R.drawable.book_blank);
-              LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(dp(34), dp(48));
-              tlp.rightMargin = dp(10);
-              headerRow.addView(thumb, tlp);
+                CheckBox cb = new CheckBox(builder.getContext());
+                cb.setChecked(checked.contains(entry.item.fileName));
+                cb.setOnCheckedChangeListener(
+                    (btn, isChecked) -> {
+                      if (isChecked) checked.add(entry.item.fileName);
+                      else checked.remove(entry.item.fileName);
+                      updateButtons.run();
+                    });
+                volRow.addView(cb, new LinearLayout.LayoutParams(-2, -2));
 
-              LinearLayout meta = col();
-              TextView titleView = label(group.title, 15, ink, true);
-              titleView.setMaxLines(2);
-              titleView.setEllipsize(TextUtils.TruncateAt.END);
-              meta.addView(titleView);
-              String subText =
-                  group.items.size()
-                      + (group.orphan ? "개  ·  " : "권  ·  ")
-                      + RemoteBooks.formatSize(group.totalBytes)
-                      + (isExpanded ? "  ·  접기 ▴" : "  ·  목록 보기 ▾");
-              TextView subView = label(subText, 12, muted, false);
-              subView.setPadding(0, dp(3), 0, 0);
-              one(subView);
-              meta.addView(subView);
-              weight(headerRow, meta);
+                LinearLayout vmeta = col();
+                TextView vTitle = label(entry.shortTitle, 14, ink, true);
+                one(vTitle);
+                vmeta.addView(vTitle);
+                TextView vSub =
+                    label(
+                        entry.subtitle,
+                        12,
+                        !entry.item.complete || entry.missing || group.orphan ? danger : muted,
+                        false);
+                vSub.setPadding(0, dp(2), 0, 0);
+                one(vSub);
+                vmeta.addView(vSub);
+                weight(volRow, vmeta);
 
-              TextView clearGrpBtn = label("비우기", 13, danger, true);
-              pad(clearGrpBtn, 10, 10);
-              clearGrpBtn.setMinimumHeight(dp(44));
-              clearGrpBtn.setGravity(Gravity.CENTER);
-              clearGrpBtn.setOnClickListener(v -> confirmDeleteGroup.accept(group));
-              headerRow.addView(clearGrpBtn);
+                TextView delBtn = label("삭제", 12, danger, true);
+                pad(delBtn, 8, 8);
+                delBtn.setMinimumHeight(dp(40));
+                delBtn.setGravity(Gravity.CENTER);
+                delBtn.setOnClickListener(v -> confirmDeleteEntry.accept(entry));
+                volRow.addView(delBtn);
 
-              headerRow.setOnClickListener(
-                  v -> {
-                    if (expanded.contains(group.grp)) expanded.remove(group.grp);
-                    else expanded.add(group.grp);
-                    rebuildRef[0].run();
-                  });
-              listBox.addView(headerRow, -1, -2);
-
-              if (isExpanded) {
-                LinearLayout subList = col();
-                subList.setBackground(shape(surface, 8));
-                subList.setPadding(dp(6), dp(4), dp(4), dp(4));
-                LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-1, -2);
-                slp.bottomMargin = dp(8);
-                for (int ei = 0; ei < group.items.size(); ei++) {
-                  RemoteCacheEntry entry = group.items.get(ei);
-                  LinearLayout volRow = row();
-                  pad(volRow, 2, 6);
-                  volRow.setMinimumHeight(dp(46));
-
-                  CheckBox cb = new CheckBox(builder.getContext());
-                  cb.setChecked(checked.contains(entry.item.fileName));
-                  cb.setOnCheckedChangeListener(
-                      (btn, isChecked) -> {
-                        if (isChecked) checked.add(entry.item.fileName);
-                        else checked.remove(entry.item.fileName);
-                        updateButtons.run();
-                      });
-                  volRow.addView(cb, new LinearLayout.LayoutParams(-2, -2));
-
-                  LinearLayout vmeta = col();
-                  TextView vTitle = label(entry.shortTitle, 14, ink, true);
-                  one(vTitle);
-                  vmeta.addView(vTitle);
-                  TextView vSub =
-                      label(
-                          entry.subtitle,
-                          12,
-                          !entry.item.complete || entry.missing || group.orphan ? danger : muted,
-                          false);
-                  vSub.setPadding(0, dp(2), 0, 0);
-                  one(vSub);
-                  vmeta.addView(vSub);
-                  weight(volRow, vmeta);
-
-                  TextView delBtn = label("삭제", 12, danger, true);
-                  pad(delBtn, 8, 8);
-                  delBtn.setMinimumHeight(dp(40));
-                  delBtn.setGravity(Gravity.CENTER);
-                  delBtn.setOnClickListener(v -> confirmDeleteEntry.accept(entry));
-                  volRow.addView(delBtn);
-
-                  volRow.setOnClickListener(v -> cb.setChecked(!cb.isChecked()));
-                  subList.addView(volRow, -1, -2);
-                }
-                listBox.addView(subList, slp);
+                volRow.setOnClickListener(v -> cb.setChecked(!cb.isChecked()));
+                subList.addView(volRow, -1, -2);
               }
+              listBox.addView(subList, slp);
             }
           }
           updateButtons.run();
@@ -1142,7 +1089,7 @@ public final class Main extends Activity {
 
     AlertDialog dlg =
         builder
-            .setTitle("PC 원격 보관함")
+            .setTitle("원격 보관함")
             .setView(rootBox)
             .setPositiveButton("모두 지우기", null)
             .setNegativeButton("닫기", null)
@@ -1187,13 +1134,13 @@ public final class Main extends Activity {
                         .setMessage(
                             "보관함 전체 ("
                                 + RemoteBooks.formatSize(u[1])
-                                + ")을 휴대폰에서 지웁니다. 다시 읽으려면 PC에서 다시 받아야 합니다.")
+                                + ")을 휴대폰에서 지웁니다. 다시 읽으려면 원격 폴더에서 다시 받아야 합니다.")
                         .setPositiveButton(
                             "지우기",
                             (d2, w2) -> {
                               checked.clear();
                               clearAllRemoteCache();
-                              toast("PC 원격 보관함을 비웠습니다.");
+                              toast("원격 보관함을 비웠습니다.");
                               rebuildRef[0].run();
                             })
                         .setNegativeButton("취소", null)

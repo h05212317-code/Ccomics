@@ -324,8 +324,9 @@ public class WebDavTest {
     WebDav.Cache.clear(ctx);
     try (Library lib = new Library(ctx)) {
       String root = s.url("/root/").toString();
-      long sid = lib.register(root, "pik", "pw");
-      lib.scan(sid, () -> {});
+      lib.exec("INSERT INTO sources(id,url,user,secret) VALUES(1,?,'pik','')", root);
+      lib.httpAuths.put(1L, auth);
+      lib.scan(1L, () -> {});
       List<Library.Book> books = lib.books();
       assertEquals(4, books.size());
       for (Library.Book b : books) {
