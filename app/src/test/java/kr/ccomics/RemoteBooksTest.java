@@ -417,4 +417,126 @@ public class RemoteBooksTest {
       localZip.delete();
     }
   }
+
+  @Test
+  public void remoteCacheListingMatchesBooksBundlesPartialsAndOrphans() throws Exception {
+    Main host = org.robolectric.Robolectric.buildActivity(Main.class).get();
+    host.prefs = host.getSharedPreferences("cache-manage-test", 0);
+    host.prefs.edit().putBoolean("remoteOn", false).apply(); // 원격 폴더가 꺼져 있어도 DB로 책 이름을 찾는다.
+    host.frame = new android.widget.FrameLayout(host);
+    host.setContentView(host.frame);
+    host.theme();
+    RemoteBooks.clear(host);
+    try (Library lib = new Library(host)) {
+      host.db = lib;
+      String uA1 = "https://pc.example/ccomics/alpha-1.zip";
+      String uA2 = "https://pc.example/ccomics/alpha-2.zip";
+      String uB = "https://pc.example/ccomics/beta-bundle.zip";
+      String uB1 = Archive.nested(uB, "beta-01.zip");
+      String uB2 = Archive.nested(uB, "beta-02.zip");
+      String uMiss = "https://pc.example/ccomics/gone-1.zip";
+      String uPart = "https://pc.example/ccomics/partial-1.zip";
+      lib.exec("INSERT INTO sources(id,url,user,secret) VALUES(1,'https://pc.example/ccomics/','','')");
+      lib.exec(
+          "INSERT INTO books(source,url,title,series,grp,size,changed,seen,pages,page,opened,done,missing,bundle) VALUES"
+              + "(1,?,'알파 1권','알파','series:alpha',100,1,1,100,99,10,1,0,0),"
+              + "(1,?,'알파 2권','알파','series:alpha',100,1,1,100,40,20,0,0,0),"
+              + "(1,?,'베타 합본','베타','series:beta',100,1,1,0,0,0,0,0,1),"
+              + "(1,?,'베타 1권','베타','series:beta',100,1,1,50,0,0,1,0,0),"
+              + "(1,?,'베타 2권','베타','series:beta',100,1,1,50,0,0,0,0,0),"
+              + "(1,?,'사라진 책 1권','사라진 책','series:gone',100,1,1,50,0,0,0,1,0),"
+              + "(1,?,'미완료작 1권','미완료작','series:partial',100,1,1,50,0,0,0,0,0)",
+          uA1,
+          uA2,
+          uB,
+          uB1,
+          uB2,
+          uMiss,
+          uPart);
+
+      // 캐시 파일 생성 (크기와 수정 시각을 다르게 설정해 정렬 검증)
+      writeSized(RemoteBooks.file(host, uA1), 3 << 20, 1000L);
+      writeSized(RemoteBooks.file(host, uA2), 4 << 20, 4000L);
+      writeSized(RemoteBooks.file(host, uB), 10 << 20, 2000L);
+      writeSized(RemoteBooks.file(host, uMiss), 2 << 20, 1500L);
+      // 미완료 파일 (.part + .pieces)
+      File part = new File(RemoteBooks.file(host, uPart).getPath() + ".part");
+      writeSized(part, 4 << 20, 5000L);
+      File pieces = new File(RemoteBooks.file(host, uPart).getPath() + ".pieces");
+      try (DataOutputStream out = new DataOutputStream(new FileOutputStream(pieces))) {
+        out.writeLong(0x43435032L);
+        out.writeInt(RemoteBooks.PIECE);
+        out.writeLong(4L << 20);
+        BitSet bs = new BitSet();
+        bs.set(0); // 2MB / 4MB = 50%
+        byte[] bits = bs.toByteArray();
+        out.writeInt(bits.length);
+        out.write(bits);
+      }
+      // DB에 없는 고아 파일
+      File orphan = new File(RemoteBooks.dir(host), "deadbeef0011223344556677.zip");
+      writeSized(orphan, 1 << 20, 500L);
+
+      // 용량 큰 순: 베타(10MB) > 알파(7MB) > 미완료작(4MB+) > 사라진 책(2MB) > 고아(1MB)
+      List<Main.RemoteCacheGroup> bySize = host.buildRemoteCacheGroups(Main.CACHE_SORT_SIZE);
+      assertEquals(5, bySize.size());
+      assertEquals("베타", bySize.get(0).title);
+      assertTrue(bySize.get(0).items.get(0).isBundle);
+      assertEquals(2, bySize.get(0).items.get(0).matchedBooks.size());
+      assertTrue(bySize.get(0).items.get(0).subtitle.contains("1/2권 완독"));
+
+      assertEquals("알파", bySize.get(1).title);
+      assertEquals(2, bySize.get(1).items.size());
+      assertTrue(bySize.get(1).items.get(0).allDone);
+      assertTrue(bySize.get(1).items.get(0).subtitle.contains("완독"));
+      assertFalse(bySize.get(1).items.get(1).allDone);
+      assertTrue(bySize.get(1).items.get(1).subtitle.contains("41/100p"));
+
+      assertEquals("미완료작", bySize.get(2).title);
+      assertFalse(bySize.get(2).items.get(0).item.complete);
+      assertEquals(50, bySize.get(2).items.get(0).item.percent);
+      assertTrue(bySize.get(2).items.get(0).subtitle.contains("미완료 50%"));
+
+      assertEquals("사라진 책", bySize.get(3).title);
+      assertTrue(bySize.get(3).items.get(0).missing);
+      assertTrue(bySize.get(3).items.get(0).subtitle.contains("PC에서 사라짐"));
+
+      assertTrue(bySize.get(4).orphan);
+      assertEquals("연결되지 않은 캐시", bySize.get(4).title);
+
+      // 최근 저장순: 미완료작(5000) > 알파(4000) > 베타(2000)
+      List<Main.RemoteCacheGroup> byRecent = host.buildRemoteCacheGroups(Main.CACHE_SORT_RECENT);
+      assertEquals("미완료작", byRecent.get(0).title);
+      assertEquals("알파", byRecent.get(1).title);
+
+      // 이름순: 고아 그룹이 맨 뒤로 간다.
+      List<Main.RemoteCacheGroup> byName = host.buildRemoteCacheGroups(Main.CACHE_SORT_NAME);
+      assertTrue(byName.get(byName.size() - 1).orphan);
+
+      // 개별 삭제 검증: 알파 1권 + 미완료작(.part/.pieces) 삭제
+      assertTrue(RemoteBooks.hasAny(host, uPart));
+      assertEquals(2, host.deleteRemoteCacheFiles(Arrays.asList(RemoteBooks.fileName(uA1), RemoteBooks.fileName(uPart))));
+      assertFalse(RemoteBooks.has(host, uA1));
+      assertTrue(RemoteBooks.has(host, uA2));
+      assertFalse(RemoteBooks.hasAny(host, uPart));
+      assertFalse(part.exists());
+      assertFalse(pieces.exists());
+
+      // 원격 보관함 다이얼로그가 정상적으로 열리고 렌더링되는지 검증
+      host.remoteStorage();
+      android.app.AlertDialog shown = org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog();
+      assertNotNull(shown);
+      assertTrue(shown.isShowing());
+      shown.dismiss();
+    } finally {
+      RemoteBooks.clear(host);
+    }
+  }
+
+  private static void writeSized(File f, int size, long modified) throws IOException {
+    try (RandomAccessFile raf = new RandomAccessFile(f, "rw")) {
+      raf.setLength(size);
+    }
+    assertTrue(f.setLastModified(modified));
+  }
 }

@@ -114,6 +114,17 @@ final class Library extends SQLiteOpenHelper {
     return r;
   }
 
+  /** 원격 보관함 매칭용: 숨김·누락·묶음 원본을 포함해 PC 원격(HTTP/HTTPS) 책 전체를 돌려준다. */
+  List<Book> allRemoteBooks() {
+    List<Book> r = new ArrayList<>();
+    try (Cursor c =
+        getReadableDatabase()
+            .rawQuery(SELECT + " WHERE url LIKE 'http://%' OR url LIKE 'https://%'", null)) {
+      while (c.moveToNext()) r.add(new Book(c));
+    }
+    return r;
+  }
+
   Book get(long id) {
     try (Cursor c =
         getReadableDatabase().rawQuery(SELECT + " WHERE id=?", new String[] {"" + id})) {

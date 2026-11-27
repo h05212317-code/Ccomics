@@ -422,38 +422,780 @@ public final class Main extends Activity {
     return SORT_NAMES[idx] + " " + (desc ? "↓" : "↑");
   }
 
-  /** 받아 둔 PC 원격 책(오프라인으로 읽을 수 있는 저장본)의 용량을 보여 주고 지운다. */
+  static final int CACHE_SORT_SIZE = 0, CACHE_SORT_RECENT = 1, CACHE_SORT_NAME = 2;
+  static final String[] CACHE_SORT_NAMES = {"용량 큰 순", "최근 저장순", "이름순"};
+
+  static final class RemoteCacheEntry {
+    final RemoteBooks.Item item;
+    final Library.Book primaryBook;
+    final List<Library.Book> matchedBooks;
+    final String grp;
+    final String seriesTitle;
+    final String fullTitle;
+    final String shortTitle;
+    final String subtitle;
+    final boolean allDone;
+    final boolean isBundle;
+    final boolean missing;
+
+    RemoteCacheEntry(
+        RemoteBooks.Item item,
+        Library.Book primaryBook,
+        List<Library.Book> matchedBooks,
+        String grp,
+        String seriesTitle,
+        String fullTitle,
+        String shortTitle,
+        String subtitle,
+        boolean allDone,
+        boolean isBundle,
+        boolean missing) {
+      this.item = item;
+      this.primaryBook = primaryBook;
+      this.matchedBooks = matchedBooks;
+      this.grp = grp;
+      this.seriesTitle = seriesTitle;
+      this.fullTitle = fullTitle;
+      this.shortTitle = shortTitle;
+      this.subtitle = subtitle;
+      this.allDone = allDone;
+      this.isBundle = isBundle;
+      this.missing = missing;
+    }
+  }
+
+  static final class RemoteCacheGroup {
+    final String grp;
+    final String title;
+    final List<RemoteCacheEntry> items;
+    final Library.Book coverBook;
+    final long totalBytes;
+    final long latestModified;
+    final int completeCount;
+    final int partialCount;
+    final boolean orphan;
+
+    RemoteCacheGroup(
+        String grp,
+        String title,
+        List<RemoteCacheEntry> items,
+        Library.Book coverBook,
+        long totalBytes,
+        long latestModified,
+        int completeCount,
+        int partialCount,
+        boolean orphan) {
+      this.grp = grp;
+      this.title = title;
+      this.items = items;
+      this.coverBook = coverBook;
+      this.totalBytes = totalBytes;
+      this.latestModified = latestModified;
+      this.completeCount = completeCount;
+      this.partialCount = partialCount;
+      this.orphan = orphan;
+    }
+  }
+
+  /** 원격 보관함 파일들을 DB 책 정보와 매칭해 시리즈별로 묶고 정렬한다. */
+  List<RemoteCacheGroup> buildRemoteCacheGroups(int sortMode) {
+    List<RemoteBooks.Item> raw = RemoteBooks.list(this);
+    if (raw.isEmpty()) return Collections.emptyList();
+    boolean hideTags = prefs != null && prefs.getBoolean("hideVolumeTags", true);
+    List<Library.Book> remoteBooks = db != null ? db.allRemoteBooks() : Collections.emptyList();
+    Map<String, List<Library.Book>> nestedByFile = new HashMap<>();
+    Map<String, List<Library.Book>> directByFile = new HashMap<>();
+    Map<String, List<Library.Book>> remoteByGroup = new HashMap<>();
+    for (Library.Book b : remoteBooks) {
+      String fn = RemoteBooks.fileName(b.url);
+      if (b.url.indexOf(Archive.NESTED) >= 0) {
+        nestedByFile.computeIfAbsent(fn, k -> new ArrayList<>()).add(b);
+      } else {
+        directByFile.computeIfAbsent(fn, k -> new ArrayList<>()).add(b);
+      }
+      if (!b.grp.isEmpty()) remoteByGroup.computeIfAbsent(b.grp, k -> new ArrayList<>()).add(b);
+    }
+
+    Map<String, List<RemoteCacheEntry>> grouped = new LinkedHashMap<>();
+    for (RemoteBooks.Item item : raw) {
+      List<Library.Book> nested = nestedByFile.get(item.fileName);
+      List<Library.Book> direct = directByFile.get(item.fileName);
+      boolean isBundle = nested != null && !nested.isEmpty();
+      List<Library.Book> matched;
+      Library.Book primary = null;
+      if (isBundle) {
+        matched = new ArrayList<>(nested);
+        Order.sortBooks(matched);
+        for (Library.Book b : matched) {
+          if (b.rep) {
+            primary = b;
+            break;
+          }
+        }
+        if (primary == null) {
+          for (Library.Book b : matched) {
+            if (!b.missing) {
+              primary = b;
+              break;
+            }
+          }
+        }
+        if (primary == null) primary = matched.get(0);
+      } else if (direct != null && !direct.isEmpty()) {
+        matched = new ArrayList<>(direct);
+        Order.sortBooks(matched);
+        for (Library.Book b : matched) {
+          if (!b.missing) {
+            primary = b;
+            break;
+          }
+        }
+        if (primary == null) primary = matched.get(0);
+      } else {
+        matched = Collections.emptyList();
+      }
+
+      String grp;
+      String seriesTitle;
+      String fullTitle;
+      String shortTitle;
+      boolean missing = false;
+      boolean allDone = false;
+
+      if (primary != null) {
+        grp = primary.grp.isEmpty() ? ("book:" + primary.id) : primary.grp;
+        SeriesEntry se = entries.get(grp);
+        if (se != null) {
+          seriesTitle = se.displayTitle;
+        } else {
+          List<Library.Book> sameGrp = remoteByGroup.get(grp);
+          seriesTitle =
+              sameGrp != null && !sameGrp.isEmpty()
+                  ? Order.bestSeriesTitle(sameGrp, hideTags)
+                  : Order.shelfTitle(primary.series, hideTags);
+        }
+        if (seriesTitle.isEmpty()) seriesTitle = Order.shelfTitle(primary.title, hideTags);
+
+        if (isBundle) {
+          String outerTitle =
+              direct != null && !direct.isEmpty()
+                  ? Order.shelfTitle(direct.get(0).title, hideTags)
+                  : seriesTitle;
+          if (outerTitle.isEmpty()) outerTitle = seriesTitle;
+          fullTitle = outerTitle + " (묶음 · " + matched.size() + "권)";
+          shortTitle =
+              outerTitle.equals(seriesTitle)
+                  ? "묶음 파일 · " + matched.size() + "권"
+                  : outerTitle + " (" + matched.size() + "권)";
+        } else {
+          fullTitle = Order.volumeDisplayTitle(seriesTitle, primary.title, primary.comicNumber, hideTags);
+          if (fullTitle.isEmpty()) fullTitle = Order.shelfTitle(primary.title, hideTags);
+          String vol = Order.volumeLabel(primary.title, primary.comicNumber);
+          shortTitle = !vol.isEmpty() ? vol : fullTitle;
+        }
+
+        missing = true;
+        for (Library.Book b : matched) {
+          if (!b.missing) {
+            missing = false;
+            break;
+          }
+        }
+        if (item.complete && !matched.isEmpty()) {
+          allDone = true;
+          for (Library.Book b : matched) {
+            if (!b.done) {
+              allDone = false;
+              break;
+            }
+          }
+        }
+      } else {
+        grp = "__orphan__";
+        seriesTitle = "연결되지 않은 캐시";
+        String shortHash =
+            item.fileName.length() > 16 ? item.fileName.substring(0, 12) + "…" : item.fileName;
+        fullTitle = "알 수 없는 파일 (" + shortHash + ")";
+        shortTitle = item.fileName;
+      }
+
+      String status;
+      if (!item.complete) {
+        status = item.percent > 0 ? "미완료 " + item.percent + "%" : "받기 중단됨";
+      } else if (primary == null) {
+        status = "서재 기록 없음";
+      } else if (missing) {
+        status = "PC에서 사라짐";
+      } else if (allDone) {
+        status = "완독";
+      } else if (isBundle) {
+        int doneCount = 0;
+        for (Library.Book b : matched) if (b.done) doneCount++;
+        status = doneCount > 0 ? "묶음 · " + doneCount + "/" + matched.size() + "권 완독" : "묶음 저장됨";
+      } else if (primary.opened > 0 && primary.pages > 0) {
+        status = (primary.page + 1) + "/" + primary.pages + "p";
+      } else {
+        status = "읽지 않음";
+      }
+      String subtitle = RemoteBooks.formatSize(item.bytes) + "  ·  " + status;
+
+      RemoteCacheEntry entry =
+          new RemoteCacheEntry(
+              item,
+              primary,
+              matched,
+              grp,
+              seriesTitle,
+              fullTitle,
+              shortTitle,
+              subtitle,
+              allDone,
+              isBundle,
+              missing);
+      grouped.computeIfAbsent(grp, k -> new ArrayList<>()).add(entry);
+    }
+
+    List<RemoteCacheGroup> result = new ArrayList<>(grouped.size());
+    for (Map.Entry<String, List<RemoteCacheEntry>> e : grouped.entrySet()) {
+      String grp = e.getKey();
+      List<RemoteCacheEntry> list = e.getValue();
+      boolean orphan = "__orphan__".equals(grp);
+      list.sort(
+          (a, b) -> {
+            if (a.primaryBook != null && b.primaryBook != null) {
+              int c = Order.compareBooks(a.primaryBook, b.primaryBook);
+              if (c != 0) return c;
+            }
+            return Order.natural(a.shortTitle, b.shortTitle);
+          });
+      long bytes = 0, latest = 0;
+      int completeCount = 0, partialCount = 0;
+      for (RemoteCacheEntry entry : list) {
+        bytes += entry.item.bytes;
+        latest = Math.max(latest, entry.item.modified);
+        if (entry.item.complete) completeCount++;
+        else partialCount++;
+      }
+      SeriesEntry se = entries.get(grp);
+      Library.Book coverBook = se != null ? se.rep : list.get(0).primaryBook;
+      String title = list.get(0).seriesTitle;
+      result.add(
+          new RemoteCacheGroup(
+              grp, title, list, coverBook, bytes, latest, completeCount, partialCount, orphan));
+    }
+
+    result.sort(
+        (a, b) -> {
+          if (sortMode == CACHE_SORT_NAME) {
+            if (a.orphan != b.orphan) return a.orphan ? 1 : -1;
+            int c = Order.natural(a.title, b.title);
+            return c != 0 ? c : Long.compare(b.totalBytes, a.totalBytes);
+          }
+          if (sortMode == CACHE_SORT_RECENT) {
+            int c = Long.compare(b.latestModified, a.latestModified);
+            return c != 0 ? c : Long.compare(b.totalBytes, a.totalBytes);
+          }
+          int c = Long.compare(b.totalBytes, a.totalBytes);
+          if (c != 0) return c;
+          return Order.natural(a.title, b.title);
+        });
+    return result;
+  }
+
+  int deleteRemoteCacheFiles(Collection<String> fileNames) {
+    if (loadingBook) abortActiveDownload();
+    int removed = RemoteBooks.deleteAll(this, fileNames);
+    if (removed > 0) refreshRemoteEntries();
+    return removed;
+  }
+
+  void clearAllRemoteCache() {
+    if (loadingBook) abortActiveDownload();
+    RemoteBooks.clear(this);
+    refreshRemoteEntries();
+  }
+
+  /** 받아 둔 PC 원격 책(오프라인 저장본)을 작품·권별로 확인하고 개별·시리즈·완독·전체 삭제한다. */
   void remoteStorage() {
-    long[] u = RemoteBooks.usage(this);
-    String size =
-        u[1] >= (1L << 30)
-            ? String.format(Locale.KOREA, "%.1fGB", u[1] / (double) (1L << 30))
-            : (u[1] >> 20) + "MB";
-    dialog()
-        .setTitle("PC 원격 보관함")
-        .setMessage(
-            "받아 둔 책 "
-                + u[0]
-                + "권 · "
-                + size
-                + "\n\n받아 둔 책은 PC가 꺼져 있거나 인터넷이 없어도 열립니다. 지우기 전까지 계속 보관됩니다.")
-        .setPositiveButton(
-            "모두 지우기",
-            (d, w) ->
-                dialog()
-                    .setTitle("보관함 비우기")
-                    .setMessage(u[0] + "권(" + size + ")을 휴대폰에서 지웁니다. 다시 읽으려면 PC에서 다시 받아야 합니다.")
-                    .setPositiveButton(
-                        "지우기",
-                        (d2, w2) -> {
-                          RemoteBooks.clear(this);
-                          refreshRemoteEntries();
-                          toast("PC 원격 보관함을 비웠습니다.");
-                        })
-                    .setNegativeButton("취소", null)
-                    .show())
-        .setNegativeButton("닫기", null)
-        .show();
+    AlertDialog.Builder builder = dialog();
+    LinearLayout rootBox = col();
+    pad(rootBox, 18, 8);
+
+    TextView summaryView = label("", 14, ink, true);
+    rootBox.addView(summaryView);
+
+    TextView captionView =
+        label("PC가 꺼져 있어도 바로 열립니다. 지워도 PC 원본은 유지됩니다.", 12, muted, false);
+    captionView.setPadding(0, dp(3), 0, dp(10));
+    rootBox.addView(captionView);
+
+    HorizontalScrollView chipScroll = new HorizontalScrollView(builder.getContext());
+    chipScroll.setHorizontalScrollBarEnabled(false);
+    LinearLayout chipRow = row();
+    chipScroll.addView(chipRow);
+    LinearLayout.LayoutParams chipLp = new LinearLayout.LayoutParams(-1, -2);
+    chipLp.bottomMargin = dp(8);
+    rootBox.addView(chipScroll, chipLp);
+
+    View topDivider = new View(this);
+    topDivider.setBackgroundColor(surface);
+    rootBox.addView(topDivider, new LinearLayout.LayoutParams(-1, dp(1)));
+
+    ScrollView scroll = new ScrollView(builder.getContext());
+    LinearLayout listBox = col();
+    scroll.addView(listBox);
+    LinearLayout.LayoutParams scrollLp = new LinearLayout.LayoutParams(-1, -2, 1);
+    rootBox.addView(scroll, scrollLp);
+
+    final int[] sortMode = {CACHE_SORT_SIZE};
+    final Set<String> expanded = new HashSet<>();
+    final Set<String> checked = new LinkedHashSet<>();
+    final List<RemoteCacheGroup> currentGroups = new ArrayList<>();
+    final AlertDialog[] holder = new AlertDialog[1];
+    final int danger = dark ? 0xffff7b7b : 0xffc62828;
+
+    Runnable[] rebuildRef = new Runnable[1];
+    Runnable updateButtons =
+        () -> {
+          AlertDialog dlg = holder[0];
+          if (dlg == null) return;
+          Button pos = dlg.getButton(DialogInterface.BUTTON_POSITIVE);
+          if (pos == null) return;
+          if (currentGroups.isEmpty()) {
+            pos.setVisibility(View.GONE);
+            return;
+          }
+          pos.setVisibility(View.VISIBLE);
+          if (checked.isEmpty()) {
+            pos.setText("모두 지우기");
+            pos.setTextColor(danger);
+          } else {
+            long selBytes = 0;
+            for (RemoteCacheGroup g : currentGroups)
+              for (RemoteCacheEntry e : g.items)
+                if (checked.contains(e.item.fileName)) selBytes += e.item.bytes;
+            pos.setText("선택 삭제 (" + checked.size() + " · " + RemoteBooks.formatSize(selBytes) + ")");
+            pos.setTextColor(danger);
+          }
+        };
+
+    java.util.function.BiFunction<String, Boolean, TextView> makeChip =
+        (text, highlight) -> {
+          TextView chip = label(text, 12, highlight ? accent : ink, true);
+          pad(chip, 11, 7);
+          chip.setBackground(shape(surface, 16));
+          LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+          lp.rightMargin = dp(8);
+          chip.setLayoutParams(lp);
+          return chip;
+        };
+
+    java.util.function.Consumer<RemoteCacheEntry> confirmDeleteEntry =
+        entry ->
+            dialog()
+                .setTitle("보관함에서 삭제")
+                .setMessage(
+                    entry.fullTitle
+                        + " ("
+                        + RemoteBooks.formatSize(entry.item.bytes)
+                        + ")을 휴대폰 보관함에서 지웁니다.\n다시 읽으려면 PC에서 다시 받아야 합니다.")
+                .setPositiveButton(
+                    "삭제",
+                    (d, w) -> {
+                      checked.remove(entry.item.fileName);
+                      deleteRemoteCacheFiles(Collections.singletonList(entry.item.fileName));
+                      toast("보관함에서 삭제했습니다.");
+                      rebuildRef[0].run();
+                    })
+                .setNegativeButton("취소", null)
+                .show();
+
+    java.util.function.Consumer<RemoteCacheGroup> confirmDeleteGroup =
+        group ->
+            dialog()
+                .setTitle("작품 캐시 비우기")
+                .setMessage(
+                    "\""
+                        + group.title
+                        + "\" 보관함 "
+                        + group.items.size()
+                        + "개 ("
+                        + RemoteBooks.formatSize(group.totalBytes)
+                        + ")을 휴대폰에서 지웁니다.")
+                .setPositiveButton(
+                    "비우기",
+                    (d, w) -> {
+                      List<String> files = new ArrayList<>(group.items.size());
+                      for (RemoteCacheEntry e : group.items) {
+                        files.add(e.item.fileName);
+                        checked.remove(e.item.fileName);
+                      }
+                      deleteRemoteCacheFiles(files);
+                      toast("\"" + group.title + "\" 보관함을 비웠습니다.");
+                      rebuildRef[0].run();
+                    })
+                .setNegativeButton("취소", null)
+                .show();
+
+    rebuildRef[0] =
+        () -> {
+          currentGroups.clear();
+          currentGroups.addAll(buildRemoteCacheGroups(sortMode[0]));
+
+          Set<String> validFiles = new HashSet<>();
+          int completeCount = 0, partialCount = 0;
+          long totalBytes = 0;
+          List<String> doneFiles = new ArrayList<>();
+          long doneBytes = 0;
+          List<String> partialFiles = new ArrayList<>();
+          long partialBytes = 0;
+          for (RemoteCacheGroup g : currentGroups) {
+            totalBytes += g.totalBytes;
+            completeCount += g.completeCount;
+            partialCount += g.partialCount;
+            for (RemoteCacheEntry e : g.items) {
+              validFiles.add(e.item.fileName);
+              if (e.allDone) {
+                doneFiles.add(e.item.fileName);
+                doneBytes += e.item.bytes;
+              }
+              if (!e.item.complete) {
+                partialFiles.add(e.item.fileName);
+                partialBytes += e.item.bytes;
+              }
+            }
+          }
+          checked.retainAll(validFiles);
+
+          if (currentGroups.isEmpty()) {
+            summaryView.setText("받아 둔 책이 없습니다.");
+            chipScroll.setVisibility(View.GONE);
+          } else {
+            StringBuilder sum = new StringBuilder();
+            if (completeCount > 0) sum.append("받아 둔 책 ").append(completeCount).append("권");
+            if (partialCount > 0) {
+              if (sum.length() > 0) sum.append("  ·  ");
+              sum.append("미완료 ").append(partialCount).append("건");
+            }
+            sum.append("  ·  ").append(RemoteBooks.formatSize(totalBytes));
+            summaryView.setText(sum.toString());
+            chipScroll.setVisibility(View.VISIBLE);
+          }
+
+          chipRow.removeAllViews();
+          if (!currentGroups.isEmpty()) {
+            TextView sortChip =
+                makeChip.apply("정렬: " + CACHE_SORT_NAMES[sortMode[0]] + " ▾", false);
+            sortChip.setOnClickListener(
+                v -> {
+                  sortMode[0] = (sortMode[0] + 1) % CACHE_SORT_NAMES.length;
+                  rebuildRef[0].run();
+                });
+            chipRow.addView(sortChip);
+
+            if (!doneFiles.isEmpty()) {
+              long fDoneBytes = doneBytes;
+              TextView doneChip =
+                  makeChip.apply(
+                      "완독 비우기 (" + doneFiles.size() + " · " + RemoteBooks.formatSize(fDoneBytes) + ")",
+                      true);
+              doneChip.setOnClickListener(
+                  v ->
+                      dialog()
+                          .setTitle("완독 책 비우기")
+                          .setMessage(
+                              "완독한 책 "
+                                  + doneFiles.size()
+                                  + "권 ("
+                                  + RemoteBooks.formatSize(fDoneBytes)
+                                  + ")을 보관함에서 지웁니다.")
+                          .setPositiveButton(
+                              "비우기",
+                              (d, w) -> {
+                                checked.removeAll(doneFiles);
+                                deleteRemoteCacheFiles(doneFiles);
+                                toast("완독 책 " + doneFiles.size() + "권을 비웠습니다.");
+                                rebuildRef[0].run();
+                              })
+                          .setNegativeButton("취소", null)
+                          .show());
+              chipRow.addView(doneChip);
+            }
+
+            if (!partialFiles.isEmpty()) {
+              long fPartialBytes = partialBytes;
+              TextView partChip =
+                  makeChip.apply(
+                      "미완료 정리 ("
+                          + partialFiles.size()
+                          + " · "
+                          + RemoteBooks.formatSize(fPartialBytes)
+                          + ")",
+                      false);
+              partChip.setOnClickListener(
+                  v ->
+                      dialog()
+                          .setTitle("미완료 파일 정리")
+                          .setMessage(
+                              "받다가 중단된 파일 "
+                                  + partialFiles.size()
+                                  + "건 ("
+                                  + RemoteBooks.formatSize(fPartialBytes)
+                                  + ")을 지웁니다.")
+                          .setPositiveButton(
+                              "정리",
+                              (d, w) -> {
+                                checked.removeAll(partialFiles);
+                                deleteRemoteCacheFiles(partialFiles);
+                                toast("미완료 파일 " + partialFiles.size() + "건을 정리했습니다.");
+                                rebuildRef[0].run();
+                              })
+                          .setNegativeButton("취소", null)
+                          .show());
+              chipRow.addView(partChip);
+            }
+          }
+
+          listBox.removeAllViews();
+          if (currentGroups.isEmpty()) {
+            TextView empty =
+                label(
+                    "보관함에 저장된 원격 책이 없습니다.\nPC 원격 책을 열면 자동으로 이곳에 저장됩니다.",
+                    13,
+                    muted,
+                    false);
+            empty.setGravity(Gravity.CENTER);
+            pad(empty, 8, 28);
+            listBox.addView(empty, -1, -2);
+            updateButtons.run();
+            return;
+          }
+
+          for (int gi = 0; gi < currentGroups.size(); gi++) {
+            RemoteCacheGroup group = currentGroups.get(gi);
+            if (gi > 0) {
+              View div = new View(this);
+              div.setBackgroundColor(surface);
+              listBox.addView(div, new LinearLayout.LayoutParams(-1, dp(1)));
+            }
+
+            if (group.items.size() == 1) {
+              RemoteCacheEntry entry = group.items.get(0);
+              LinearLayout itemRow = row();
+              pad(itemRow, 0, 10);
+              itemRow.setMinimumHeight(dp(56));
+
+              CheckBox cb = new CheckBox(builder.getContext());
+              cb.setChecked(checked.contains(entry.item.fileName));
+              cb.setOnCheckedChangeListener(
+                  (btn, isChecked) -> {
+                    if (isChecked) checked.add(entry.item.fileName);
+                    else checked.remove(entry.item.fileName);
+                    updateButtons.run();
+                  });
+              itemRow.addView(cb, new LinearLayout.LayoutParams(-2, -2));
+
+              ImageView thumb = new ImageView(this);
+              thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+              thumb.setBackground(shape(surface, 4));
+              thumb.setClipToOutline(true);
+              if (entry.primaryBook != null) loadCover(thumb, entry.primaryBook);
+              else thumb.setImageResource(R.drawable.book_blank);
+              LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(dp(34), dp(48));
+              tlp.rightMargin = dp(10);
+              itemRow.addView(thumb, tlp);
+
+              LinearLayout meta = col();
+              TextView titleView = label(entry.fullTitle, 14, ink, true);
+              titleView.setMaxLines(2);
+              titleView.setEllipsize(TextUtils.TruncateAt.END);
+              meta.addView(titleView);
+              TextView subView =
+                  label(
+                      entry.subtitle,
+                      12,
+                      !entry.item.complete || entry.missing || group.orphan ? danger : muted,
+                      false);
+              subView.setPadding(0, dp(3), 0, 0);
+              one(subView);
+              meta.addView(subView);
+              weight(itemRow, meta);
+
+              TextView delBtn = label("삭제", 13, danger, true);
+              pad(delBtn, 10, 10);
+              delBtn.setMinimumHeight(dp(44));
+              delBtn.setGravity(Gravity.CENTER);
+              delBtn.setOnClickListener(v -> confirmDeleteEntry.accept(entry));
+              itemRow.addView(delBtn);
+
+              itemRow.setOnClickListener(v -> cb.setChecked(!cb.isChecked()));
+              listBox.addView(itemRow, -1, -2);
+            } else {
+              boolean isExpanded = expanded.contains(group.grp);
+              LinearLayout headerRow = row();
+              pad(headerRow, 2, 10);
+              headerRow.setMinimumHeight(dp(58));
+
+              ImageView thumb = new ImageView(this);
+              thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+              thumb.setBackground(shape(surface, 4));
+              thumb.setClipToOutline(true);
+              if (group.coverBook != null) loadCover(thumb, group.coverBook);
+              else thumb.setImageResource(R.drawable.book_blank);
+              LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(dp(34), dp(48));
+              tlp.rightMargin = dp(10);
+              headerRow.addView(thumb, tlp);
+
+              LinearLayout meta = col();
+              TextView titleView = label(group.title, 15, ink, true);
+              titleView.setMaxLines(2);
+              titleView.setEllipsize(TextUtils.TruncateAt.END);
+              meta.addView(titleView);
+              String subText =
+                  group.items.size()
+                      + (group.orphan ? "개  ·  " : "권  ·  ")
+                      + RemoteBooks.formatSize(group.totalBytes)
+                      + (isExpanded ? "  ·  접기 ▴" : "  ·  목록 보기 ▾");
+              TextView subView = label(subText, 12, muted, false);
+              subView.setPadding(0, dp(3), 0, 0);
+              one(subView);
+              meta.addView(subView);
+              weight(headerRow, meta);
+
+              TextView clearGrpBtn = label("비우기", 13, danger, true);
+              pad(clearGrpBtn, 10, 10);
+              clearGrpBtn.setMinimumHeight(dp(44));
+              clearGrpBtn.setGravity(Gravity.CENTER);
+              clearGrpBtn.setOnClickListener(v -> confirmDeleteGroup.accept(group));
+              headerRow.addView(clearGrpBtn);
+
+              headerRow.setOnClickListener(
+                  v -> {
+                    if (expanded.contains(group.grp)) expanded.remove(group.grp);
+                    else expanded.add(group.grp);
+                    rebuildRef[0].run();
+                  });
+              listBox.addView(headerRow, -1, -2);
+
+              if (isExpanded) {
+                LinearLayout subList = col();
+                subList.setBackground(shape(surface, 8));
+                subList.setPadding(dp(6), dp(4), dp(4), dp(4));
+                LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-1, -2);
+                slp.bottomMargin = dp(8);
+                for (int ei = 0; ei < group.items.size(); ei++) {
+                  RemoteCacheEntry entry = group.items.get(ei);
+                  LinearLayout volRow = row();
+                  pad(volRow, 2, 6);
+                  volRow.setMinimumHeight(dp(46));
+
+                  CheckBox cb = new CheckBox(builder.getContext());
+                  cb.setChecked(checked.contains(entry.item.fileName));
+                  cb.setOnCheckedChangeListener(
+                      (btn, isChecked) -> {
+                        if (isChecked) checked.add(entry.item.fileName);
+                        else checked.remove(entry.item.fileName);
+                        updateButtons.run();
+                      });
+                  volRow.addView(cb, new LinearLayout.LayoutParams(-2, -2));
+
+                  LinearLayout vmeta = col();
+                  TextView vTitle = label(entry.shortTitle, 14, ink, true);
+                  one(vTitle);
+                  vmeta.addView(vTitle);
+                  TextView vSub =
+                      label(
+                          entry.subtitle,
+                          12,
+                          !entry.item.complete || entry.missing || group.orphan ? danger : muted,
+                          false);
+                  vSub.setPadding(0, dp(2), 0, 0);
+                  one(vSub);
+                  vmeta.addView(vSub);
+                  weight(volRow, vmeta);
+
+                  TextView delBtn = label("삭제", 12, danger, true);
+                  pad(delBtn, 8, 8);
+                  delBtn.setMinimumHeight(dp(40));
+                  delBtn.setGravity(Gravity.CENTER);
+                  delBtn.setOnClickListener(v -> confirmDeleteEntry.accept(entry));
+                  volRow.addView(delBtn);
+
+                  volRow.setOnClickListener(v -> cb.setChecked(!cb.isChecked()));
+                  subList.addView(volRow, -1, -2);
+                }
+                listBox.addView(subList, slp);
+              }
+            }
+          }
+          updateButtons.run();
+        };
+
+    rebuildRef[0].run();
+
+    AlertDialog dlg =
+        builder
+            .setTitle("PC 원격 보관함")
+            .setView(rootBox)
+            .setPositiveButton("모두 지우기", null)
+            .setNegativeButton("닫기", null)
+            .create();
+    holder[0] = dlg;
+    dlg.setOnShowListener(
+        di -> {
+          updateButtons.run();
+          Button pos = dlg.getButton(DialogInterface.BUTTON_POSITIVE);
+          if (pos != null) {
+            pos.setOnClickListener(
+                v -> {
+                  if (currentGroups.isEmpty()) return;
+                  if (!checked.isEmpty()) {
+                    List<String> toDelete = new ArrayList<>(checked);
+                    long selBytes = 0;
+                    for (RemoteCacheGroup g : currentGroups)
+                      for (RemoteCacheEntry e : g.items)
+                        if (checked.contains(e.item.fileName)) selBytes += e.item.bytes;
+                    dialog()
+                        .setTitle("선택 항목 삭제")
+                        .setMessage(
+                            "선택한 "
+                                + toDelete.size()
+                                + "개 ("
+                                + RemoteBooks.formatSize(selBytes)
+                                + ")을 휴대폰 보관함에서 지웁니다.")
+                        .setPositiveButton(
+                            "삭제",
+                            (d2, w2) -> {
+                              checked.clear();
+                              deleteRemoteCacheFiles(toDelete);
+                              toast(toDelete.size() + "개 항목을 보관함에서 삭제했습니다.");
+                              rebuildRef[0].run();
+                            })
+                        .setNegativeButton("취소", null)
+                        .show();
+                  } else {
+                    long[] u = RemoteBooks.usage(this);
+                    dialog()
+                        .setTitle("보관함 비우기")
+                        .setMessage(
+                            "보관함 전체 ("
+                                + RemoteBooks.formatSize(u[1])
+                                + ")을 휴대폰에서 지웁니다. 다시 읽으려면 PC에서 다시 받아야 합니다.")
+                        .setPositiveButton(
+                            "지우기",
+                            (d2, w2) -> {
+                              checked.clear();
+                              clearAllRemoteCache();
+                              toast("PC 원격 보관함을 비웠습니다.");
+                              rebuildRef[0].run();
+                            })
+                        .setNegativeButton("취소", null)
+                        .show();
+                  }
+                });
+          }
+        });
+    dlg.show();
   }
 
   /** PC 원격 폴더 사용 여부. 끄면 원격 책을 책장에서 숨기고 새로고침 때 연결하지 않는다. */
@@ -2695,6 +3437,11 @@ public final class Main extends Activity {
   }
 
   void settings() {
+    long[] remoteUsage = RemoteBooks.usage(this);
+    String remoteStorageLabel =
+        remoteUsage[1] > 0
+            ? "PC 원격 보관함 관리 · " + RemoteBooks.formatSize(remoteUsage[1])
+            : "PC 원격 보관함 관리";
     choices(
         "서재 설정",
         new String[] {
@@ -2709,7 +3456,7 @@ public final class Main extends Activity {
           "책 이름만 표시 · " + (prefs.getBoolean("hideVolumeTags", true) ? "켜짐" : "꺼짐"),
           "작품 수 표시 · " + (showShelfCount() ? "켜짐" : "꺼짐"),
           "PC 원격 폴더 · " + (remoteOn() ? "켜짐" : "꺼짐"),
-          "PC 원격 보관함 관리"
+          remoteStorageLabel
         },
         i -> {
           if (i == 0) refreshSources(false);
@@ -2840,20 +3587,76 @@ public final class Main extends Activity {
 
   void manage(Library.Book b) {
     int rating = groupRating(b.grp);
+    boolean inSeriesDetail = !selected.isEmpty();
+    LinkedHashSet<String> cachedFiles = new LinkedHashSet<>();
+    long cachedBytes = 0;
+    int cachedVolumes = 0;
+    if (inSeriesDetail) {
+      if (WebDav.isUrl(b.url) && RemoteBooks.hasAny(this, b.url)) {
+        cachedFiles.add(RemoteBooks.fileName(b.url));
+        cachedBytes = RemoteBooks.itemBytes(this, b.url);
+        cachedVolumes = 1;
+      }
+    } else {
+      List<Library.Book> group = groups.get(b.grp);
+      if (group != null) {
+        for (Library.Book item : group) {
+          if (WebDav.isUrl(item.url) && RemoteBooks.hasAny(this, item.url)) {
+            cachedVolumes++;
+            String fn = RemoteBooks.fileName(item.url);
+            if (cachedFiles.add(fn)) cachedBytes += RemoteBooks.itemBytes(this, item.url);
+          }
+        }
+      }
+    }
+    List<String> menuItems =
+        new ArrayList<>(
+            Arrays.asList(
+                "별점 설정  ·  " + stars(rating),
+                "표지 변경",
+                "시리즈 대표 표지로 지정",
+                b.fav ? "즐겨찾기 해제" : "즐겨찾기",
+                b.done ? "읽지 않음으로 표시" : "완독으로 표시",
+                "책장에 배치",
+                "시리즈명 변경",
+                "다른 시리즈에 합치기",
+                "이 권을 별도 시리즈로 분리"));
+    if (!cachedFiles.isEmpty()) {
+      menuItems.add(
+          inSeriesDetail
+              ? "원격 보관함에서 삭제  ·  " + RemoteBooks.formatSize(cachedBytes)
+              : "원격 보관함에서 비우기  ·  "
+                  + cachedVolumes
+                  + "권 · "
+                  + RemoteBooks.formatSize(cachedBytes));
+    }
+    long fCachedBytes = cachedBytes;
     choices(
         volumeTitle(b),
-        new String[] {
-          "별점 설정  ·  " + stars(rating),
-          "표지 변경",
-          "시리즈 대표 표지로 지정",
-          b.fav ? "즐겨찾기 해제" : "즐겨찾기",
-          b.done ? "읽지 않음으로 표시" : "완독으로 표시",
-          "책장에 배치",
-          "시리즈명 변경",
-          "다른 시리즈에 합치기",
-          "이 권을 별도 시리즈로 분리"
-        },
+        menuItems.toArray(new String[0]),
         i -> {
+          if (i == 9 && !cachedFiles.isEmpty()) {
+            String targetName =
+                inSeriesDetail
+                    ? volumeTitle(b)
+                    : seriesDisplayName(b.grp, groups.getOrDefault(b.grp, Collections.singletonList(b)));
+            dialog()
+                .setTitle("원격 보관함에서 삭제")
+                .setMessage(
+                    targetName
+                        + " ("
+                        + RemoteBooks.formatSize(fCachedBytes)
+                        + ")을 휴대폰 보관함에서 지웁니다. PC 원본은 유지됩니다.")
+                .setPositiveButton(
+                    "삭제",
+                    (d, w) -> {
+                      deleteRemoteCacheFiles(cachedFiles);
+                      toast("원격 보관함에서 삭제했습니다.");
+                    })
+                .setNegativeButton("취소", null)
+                .show();
+            return;
+          }
           if (i == 0) {
             pickRating(b);
             return;

@@ -159,6 +159,44 @@ final class RemoteBooks {
     return split < 0 ? local : local + url.substring(split);
   }
 
+  static final class Item {
+    final String fileName;
+    final long bytes;
+    final long modified;
+    final boolean complete;
+    final int percent;
+
+    Item(String fileName, long bytes, long modified, boolean complete, int percent) {
+      this.fileName = fileName;
+      this.bytes = bytes;
+      this.modified = modified;
+      this.complete = complete;
+      this.percent = percent;
+    }
+  }
+
+  static String baseName(String rawName) {
+    if (rawName == null) return "";
+    if (rawName.endsWith(".zip.pieces.tmp"))
+      return rawName.substring(0, rawName.length() - ".pieces.tmp".length());
+    if (rawName.endsWith(".zip.pieces"))
+      return rawName.substring(0, rawName.length() - ".pieces".length());
+    if (rawName.endsWith(".zip.part"))
+      return rawName.substring(0, rawName.length() - ".part".length());
+    return rawName;
+  }
+
+  static String formatSize(long bytes) {
+    if (bytes <= 0) return "0MB";
+    if (bytes >= (1L << 30))
+      return String.format(Locale.KOREA, "%.1fGB", bytes / (double) (1L << 30));
+    if (bytes >= (10L << 20)) return Math.round(bytes / (double) (1L << 20)) + "MB";
+    if (bytes >= (1L << 20))
+      return String.format(Locale.KOREA, "%.1fMB", bytes / (double) (1L << 20));
+    if (bytes >= 1024) return Math.max(1, bytes >> 10) + "KB";
+    return bytes + "B";
+  }
+
   static long[] usage(Context ctx) {
     long bytes = 0, count = 0;
     File[] files = dir(ctx).listFiles();
@@ -168,6 +206,94 @@ final class RemoteBooks {
         if (f.getName().endsWith(".zip")) count++;
       }
     return new long[] {count, bytes};
+  }
+
+  /** 보관함에 저장된 완료/미완료 파일 목록을 파일 단위로 묶어 돌려준다(기본: 용량 큰 순). */
+  static List<Item> list(Context ctx) {
+    File d = dir(ctx);
+    File[] files = d.listFiles();
+    if (files == null || files.length == 0) return Collections.emptyList();
+    Map<String, List<File>> grouped = new LinkedHashMap<>();
+    for (File f : files) {
+      if (!f.isFile()) continue;
+      grouped.computeIfAbsent(baseName(f.getName()), k -> new ArrayList<>(2)).add(f);
+    }
+    List<Item> out = new ArrayList<>(grouped.size());
+    for (Map.Entry<String, List<File>> e : grouped.entrySet()) {
+      String base = e.getKey();
+      long bytes = 0, modified = 0;
+      File zipFile = null, partFile = null, piecesFile = null;
+      for (File f : e.getValue()) {
+        bytes += f.length();
+        modified = Math.max(modified, f.lastModified());
+        String n = f.getName();
+        if (n.equals(base) && n.endsWith(".zip")) zipFile = f;
+        else if (n.equals(base + ".part")) partFile = f;
+        else if (n.equals(base + ".pieces")) piecesFile = f;
+      }
+      boolean complete = zipFile != null;
+      int percent = complete ? 100 : 0;
+      if (!complete && partFile != null && piecesFile != null) {
+        long total = partFile.length();
+        if (total > 0) {
+          int count = (int) ((total + PIECE - 1) / PIECE);
+          BitSet done = loadPieces(piecesFile, total);
+          long got = 0;
+          for (int i = done.nextSetBit(0); i >= 0 && i < count; i = done.nextSetBit(i + 1))
+            got += Math.min(total, (long) (i + 1) * PIECE) - (long) i * PIECE;
+          percent = (int) Math.min(99, got * 100 / total);
+        }
+      }
+      out.add(new Item(base, bytes, modified, complete, percent));
+    }
+    out.sort(
+        (a, b) -> {
+          int c = Long.compare(b.bytes, a.bytes);
+          return c != 0 ? c : Long.compare(b.modified, a.modified);
+        });
+    return out;
+  }
+
+  static long itemBytes(Context ctx, String url) {
+    File d = dir(ctx);
+    String base = fileName(url);
+    long total = 0;
+    for (String suffix : new String[] {"", ".part", ".pieces", ".pieces.tmp"}) {
+      File f = new File(d, base + suffix);
+      if (f.isFile()) total += f.length();
+    }
+    return total;
+  }
+
+  static boolean hasAny(Context ctx, String url) {
+    File d = dir(ctx);
+    String base = fileName(url);
+    return new File(d, base).isFile()
+        || new File(d, base + ".part").isFile()
+        || new File(d, base + ".pieces").isFile();
+  }
+
+  static boolean delete(Context ctx, String fileName) {
+    if (fileName == null || fileName.isEmpty()) return false;
+    File d = dir(ctx);
+    String base = baseName(fileName);
+    boolean deleted = false;
+    for (String suffix : new String[] {"", ".part", ".pieces", ".pieces.tmp"}) {
+      File f = new File(d, base + suffix);
+      if (f.exists() && f.delete()) deleted = true;
+    }
+    if (!base.equals(fileName)) {
+      File raw = new File(d, fileName);
+      if (raw.exists() && raw.delete()) deleted = true;
+    }
+    return deleted;
+  }
+
+  static int deleteAll(Context ctx, Collection<String> fileNames) {
+    if (fileNames == null || fileNames.isEmpty()) return 0;
+    int removed = 0;
+    for (String name : fileNames) if (delete(ctx, name)) removed++;
+    return removed;
   }
 
   static void clear(Context ctx) {
