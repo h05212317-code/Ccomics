@@ -119,4 +119,40 @@ public class SettingsUiTest {
       assertNull(host.settingsOverlay);
     }
   }
+
+  @Test
+  public void settingsOverlayAppliesSystemBarInsetsWhenAttached() throws Exception {
+    Main host = Robolectric.buildActivity(Main.class).get();
+    host.prefs = host.getSharedPreferences("settings-insets-test", 0);
+    host.frame = new FrameLayout(host);
+    host.setContentView(host.frame);
+    host.theme();
+    try (Library lib = new Library(host)) {
+      host.db = lib;
+      host.settings();
+      assertNotNull(host.settingsOverlay);
+      androidx.core.view.WindowInsetsCompat insets =
+          new androidx.core.view.WindowInsetsCompat.Builder()
+              .setInsets(
+                  androidx.core.view.WindowInsetsCompat.Type.systemBars(),
+                  androidx.core.graphics.Insets.of(0, 72, 0, 96))
+              .build();
+      androidx.core.view.ViewCompat.dispatchApplyWindowInsets(host.settingsOverlay, insets);
+      assertEquals(72, host.settingsOverlay.getPaddingTop());
+      assertEquals(96, host.settingsOverlay.getPaddingBottom());
+
+      // 일반모드(폭 < 680dp)에서는 전체 폭, 와이드모드(폭 >= 680dp)에서는 중앙 정렬 최대 폭으로 배치된다.
+      host.getResources().getConfiguration().screenWidthDp = 390;
+      host.refreshSettingsView();
+      View narrowContent = host.settingsOverlay.findViewWithTag("settings_content");
+      assertNotNull(narrowContent);
+      assertEquals(ViewGroup.LayoutParams.MATCH_PARENT, narrowContent.getLayoutParams().width);
+
+      host.getResources().getConfiguration().screenWidthDp = 960;
+      host.refreshSettingsView();
+      View wideContent = host.settingsOverlay.findViewWithTag("settings_content");
+      assertNotNull(wideContent);
+      assertEquals(host.dp(640), wideContent.getLayoutParams().width);
+    }
+  }
 }

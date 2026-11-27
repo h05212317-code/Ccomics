@@ -106,25 +106,50 @@ final class SettingsUi {
     scroll.setTag("settings_scroll");
     scroll.setClipToPadding(false);
     scroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+    int screenW = host.getResources().getConfiguration().screenWidthDp;
+    boolean wide = screenW >= 680;
     LinearLayout content = host.col();
-    content.setPadding(host.dp(16), host.dp(10), host.dp(16), host.dp(28));
+    content.setTag("settings_content");
+    int hPad = host.dp(wide ? 24 : (screenW >= 600 ? 20 : 16));
+    content.setPadding(hPad, host.dp(10), hPad, host.dp(28));
     populate.accept(content);
-    scroll.addView(content, -1, -2);
+    FrameLayout.LayoutParams contentLp =
+        new FrameLayout.LayoutParams(
+            wide ? host.dp(640) : ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT);
+    if (wide) contentLp.gravity = Gravity.CENTER_HORIZONTAL;
+    scroll.addView(content, contentLp);
     root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
     if (scrollY > 0) scroll.post(() -> scroll.scrollTo(0, scrollY));
 
+    applySafeInsets(root, ViewCompat.getRootWindowInsets(host.frame));
     ViewCompat.setOnApplyWindowInsetsListener(
         root,
         (view, windowInsets) -> {
-          Insets safe =
-              windowInsets.getInsets(
-                  WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
-          view.setPadding(safe.left, safe.top, safe.right, safe.bottom);
+          applySafeInsets(view, windowInsets);
           return windowInsets;
         });
-    ViewCompat.requestApplyInsets(root);
+    root.addOnAttachStateChangeListener(
+        new View.OnAttachStateChangeListener() {
+          public void onViewAttachedToWindow(View v) {
+            applySafeInsets(v, ViewCompat.getRootWindowInsets(v));
+            ViewCompat.requestApplyInsets(v);
+          }
+
+          public void onViewDetachedFromWindow(View v) {}
+        });
     return root;
+  }
+
+  private void applySafeInsets(View view, WindowInsetsCompat windowInsets) {
+    if (view == null || windowInsets == null) return;
+    Insets safe =
+        Insets.max(
+            windowInsets.getInsets(
+                WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()),
+            windowInsets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars()));
+    view.setPadding(safe.left, safe.top, safe.right, safe.bottom);
   }
 
   private LinearLayout section(LinearLayout parent, String title) {

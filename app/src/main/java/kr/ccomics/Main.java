@@ -3707,6 +3707,7 @@ public final class Main extends Activity {
     else view = settingsUi().buildLibrarySettings(scrollY);
     settingsOverlay = view;
     frame.addView(view, new FrameLayout.LayoutParams(-1, -1));
+    ViewCompat.requestApplyInsets(view);
   }
 
   void refreshSettingsView() {
