@@ -900,6 +900,13 @@ final class SettingsUi {
               });
 
           addGestureSwitch(gestureCard, "좌우 탭으로 페이지 넘기기", null, "tapTurn", true, r);
+          addGestureSwitch(
+              gestureCard,
+              "다음·이전 영역 길게 눌러 권 이동",
+              "다음 페이지 쪽을 꾹 누르면 다음 권, 이전 쪽을 꾹 누르면 이전 권으로 이동",
+              "longPressVolume",
+              true,
+              r);
           addGestureSwitch(gestureCard, "좌우 스와이프로 페이지 넘기기", null, "swipeTurn", true, r);
           addGestureSwitch(gestureCard, "가운데 더블 탭으로 확대·축소", null, "doubleZoom", false, r);
           addGestureSwitch(gestureCard, "두 손가락으로 확대·축소", null, "pinchZoom", true, r);

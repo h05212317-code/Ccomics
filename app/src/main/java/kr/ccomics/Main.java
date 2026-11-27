@@ -73,7 +73,7 @@ public final class Main extends Activity {
   String selected = "", shelf = "", query = "", scanMessage = "";
   int filter, gridIndex, gridOffset, volumeIndex, volumeOffset;
   volatile int requestId;
-  volatile RemoteBooks.Cancel activeDownload;
+  volatile int activeDownloadSession;
   boolean busy, loadingBook, dark, readerImmersive, arrangeMode, resumeDismissed, floatingResumeVisible;
   int bg, ink, muted, surface, accent;
 
@@ -4264,13 +4264,105 @@ public final class Main extends Activity {
     dlg.show();
   }
 
-  void abortActiveDownload() {
-    RemoteBooks.Cancel prev = activeDownload;
-    activeDownload = null;
-    if (prev != null) {
-      prev.markCancelled();
-      readerIO.execute(prev::cancel);
+  void maybeRequestNotificationPermission() {
+    if (Build.VERSION.SDK_INT < 33 || prefs == null) return;
+    if (prefs.getBoolean("askedNotifPerm", false)) return;
+    if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+        == android.content.pm.PackageManager.PERMISSION_GRANTED) return;
+    prefs.edit().putBoolean("askedNotifPerm", true).apply();
+    try {
+      requestPermissions(new String[] {android.Manifest.permission.POST_NOTIFICATIONS}, 77);
+    } catch (Exception ignored) {
     }
+  }
+
+  final DownloadService.Listener downloadListener =
+      new DownloadService.Listener() {
+        public void onDownloadProgress(int sessionId, String bannerText) {
+          runOnUiThread(
+              () -> {
+                if (isDestroyed() || sessionId != activeDownloadSession) return;
+                scanMessage = bannerText;
+                if (reader == null) updateScanBanner();
+              });
+        }
+
+        public void onDownloadBookSaved(int sessionId, long bookId) {
+          runOnUiThread(
+              () -> {
+                if (isDestroyed() || sessionId != activeDownloadSession) return;
+                if (reader == null) refreshRemoteEntries();
+              });
+        }
+
+        public void onDownloadFinished(
+            int sessionId, long openBookId, int completedCount, boolean batch) {
+          runOnUiThread(
+              () -> {
+                if (isDestroyed() || sessionId != activeDownloadSession) return;
+                activeDownloadSession = 0;
+                getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                if (batch) {
+                  loadingBook = false;
+                  scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+                  updateScanBanner();
+                  if (reader == null) refreshRemoteEntries();
+                  toast(
+                      completedCount <= 1
+                          ? "휴대폰 보관함에 저장했습니다."
+                          : completedCount + "개 파일을 휴대폰 보관함에 저장했습니다.");
+                } else {
+                  Library.Book target = openBookId > 0 && db != null ? db.get(openBookId) : null;
+                  if (target != null) {
+                    openArchiveReady(target, requestId);
+                  } else {
+                    loadingBook = false;
+                    scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+                    updateScanBanner();
+                    if (reader == null) refreshRemoteEntries();
+                  }
+                }
+              });
+        }
+
+        public void onDownloadFailed(int sessionId, Exception e, boolean batch) {
+          runOnUiThread(
+              () -> {
+                if (isDestroyed() || sessionId != activeDownloadSession) return;
+                activeDownloadSession = 0;
+                loadingBook = false;
+                getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+                updateScanBanner();
+                if (reader == null) refreshRemoteEntries();
+                if (e instanceof InterruptedIOException) return;
+                if (e instanceof RemoteBooks.Incomplete) {
+                  RemoteBooks.Incomplete x = (RemoteBooks.Incomplete) e;
+                  alert(
+                      batch ? "미리 받기가 중간에 끊겼습니다" : "받기가 중간에 끊겼습니다",
+                      (x.total > 0 ? x.done * 100 / x.total : 0)
+                          + "%까지 휴대폰에 저장했습니다. 다시 시도하면 이어서 받습니다.\n\n원인: "
+                          + Library.reason(e));
+                } else alert(batch ? "미리 받기 실패" : "책을 열 수 없습니다", Library.reason(e));
+              });
+        }
+
+        public void onDownloadCancelled(int sessionId) {
+          runOnUiThread(
+              () -> {
+                if (isDestroyed() || sessionId != activeDownloadSession) return;
+                activeDownloadSession = 0;
+                loadingBook = false;
+                getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+                updateScanBanner();
+              });
+        }
+      };
+
+  void abortActiveDownload() {
+    activeDownloadSession = 0;
+    if (DownloadService.isRunning()) DownloadService.cancelActive(this);
   }
 
   void cancelLoadingBook() {
@@ -4282,109 +4374,49 @@ public final class Main extends Activity {
     updateScanBanner();
   }
 
-  /** 원격 책 여러 권을 열지 않고 미리 휴대폰 보관함에 받아 둔다(PikPak 프리미엄 구간 활용용). */
+  /** 원격 책 여러 권을 열지 않고 백그라운드 포그라운드 서비스로 미리 휴대폰 보관함에 받아 둔다. */
   void prefetchRemoteBooks(List<Library.Book> targets) {
     if (targets == null || targets.isEmpty()) return;
+    maybeRequestNotificationPermission();
     abortActiveDownload();
     int token = ++requestId;
     loadingBook = true;
-    RemoteBooks.Cancel cancel = new RemoteBooks.Cancel();
-    activeDownload = cancel;
     getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     scanMessage = "미리 받기를 시작합니다…";
     if (reader == null) updateScanBanner();
     readerIO.execute(
         () -> {
-          int completed = 0;
           try {
-            for (int idx = 0; idx < targets.size(); idx++) {
-              if (token != requestId || isDestroyed() || cancel.isCancelled()) break;
-              Library.Book b = targets.get(idx);
-              if (RemoteBooks.has(this, b.url)) {
-                completed++;
-                continue;
-              }
-              int pos = idx + 1, count = targets.size();
-              String origin = WebDav.isPikPak(b.url) ? "PikPak" : "PC";
-              final long[] speedState = {0L, 0L}; // [startTimeMs, startBytes]
-              RemoteBooks.download(
-                  this,
-                  b.url,
-                  db.httpAuth(b.source),
-                  new RemoteBooks.Progress() {
-                    public void update(long done, long total) {
-                      long now = System.currentTimeMillis();
-                      if (speedState[0] == 0L) {
-                        speedState[0] = now;
-                        speedState[1] = done;
-                      }
-                      String rate = formatSpeed(done - speedState[1], now - speedState[0]);
-                      runOnUiThread(
-                          () -> {
-                            if (token != requestId || isDestroyed()) return;
-                            String prefix = count > 1 ? "[" + pos + "/" + count + "] " : "";
-                            scanMessage =
-                                String.format(
-                                    Locale.KOREA,
-                                    "%s%s에서 미리 받는 중 %d%%  ·  %d / %dMB%s",
-                                    prefix,
-                                    origin,
-                                    total > 0 ? done * 100 / total : 0,
-                                    done >> 20,
-                                    total >> 20,
-                                    rate);
-                            updateScanBanner();
-                          });
-                    }
-
-                    public boolean cancelled() {
-                      return token != requestId || isDestroyed();
-                    }
-                  },
-                  cancel);
-              completed++;
+            List<DownloadService.Target> jobTargets = new ArrayList<>(targets.size());
+            for (Library.Book b : targets) {
+              if (token != requestId || isDestroyed()) return;
+              if (RemoteBooks.has(this, b.url)) continue;
+              jobTargets.add(
+                  new DownloadService.Target(b.id, b.url, volumeTitle(b), db.httpAuth(b.source)));
+            }
+            if (token != requestId || isDestroyed()) return;
+            if (jobTargets.isEmpty()) {
               runOnUiThread(
                   () -> {
-                    if (!isDestroyed() && reader == null) refreshRemoteEntries();
+                    if (isDestroyed() || token != requestId) return;
+                    loadingBook = false;
+                    scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+                    updateScanBanner();
+                    toast("이미 모두 휴대폰 보관함에 있습니다.");
                   });
+              return;
             }
-            int doneCount = completed;
-            runOnUiThread(
-                () -> {
-                  if (isDestroyed() || token != requestId) return;
-                  loadingBook = false;
-                  scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
-                  updateScanBanner();
-                  if (reader == null) refreshRemoteEntries();
-                  toast(
-                      doneCount <= 1
-                          ? "휴대폰 보관함에 저장했습니다."
-                          : doneCount + "개 파일을 휴대폰 보관함에 저장했습니다.");
-                });
+            DownloadService.setListener(downloadListener);
+            activeDownloadSession = DownloadService.startBatch(this, jobTargets);
           } catch (Exception e) {
             runOnUiThread(
                 () -> {
                   if (isDestroyed() || token != requestId) return;
                   loadingBook = false;
+                  getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                   scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
                   updateScanBanner();
-                  if (reader == null) refreshRemoteEntries();
-                  if (e instanceof InterruptedIOException) return;
-                  if (e instanceof RemoteBooks.Incomplete) {
-                    RemoteBooks.Incomplete x = (RemoteBooks.Incomplete) e;
-                    alert(
-                        "미리 받기가 중간에 끊겼습니다",
-                        (x.total > 0 ? x.done * 100 / x.total : 0)
-                            + "%까지 휴대폰에 저장했습니다. 다시 시도하면 이어서 받습니다.\n\n원인: "
-                            + Library.reason(e));
-                  } else alert("미리 받기 실패", Library.reason(e));
-                });
-          } finally {
-            if (activeDownload == cancel) activeDownload = null;
-            runOnUiThread(
-                () -> {
-                  if (token == requestId && !isDestroyed())
-                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  alert("미리 받기 실패", Library.reason(e));
                 });
           }
         });
@@ -4403,59 +4435,41 @@ public final class Main extends Activity {
     abortActiveDownload();
     int token = ++requestId;
     loadingBook = true;
-    RemoteBooks.Cancel cancel = WebDav.isUrl(b.url) ? new RemoteBooks.Cancel() : null;
-    activeDownload = cancel;
     scanMessage = "책을 여는 중…";
     if (reader == null) updateScanBanner();
+    if (WebDav.isUrl(b.url) && !RemoteBooks.has(this, b.url)) {
+      maybeRequestNotificationPermission();
+      getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+      readerIO.execute(
+          () -> {
+            try {
+              String auth = db.httpAuth(b.source);
+              if (token != requestId || isDestroyed()) return;
+              DownloadService.setListener(downloadListener);
+              activeDownloadSession =
+                  DownloadService.startSingle(
+                      this, new DownloadService.Target(b.id, b.url, volumeTitle(b), auth));
+            } catch (Exception e) {
+              runOnUiThread(
+                  () -> {
+                    if (isDestroyed() || token != requestId) return;
+                    loadingBook = false;
+                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+                    updateScanBanner();
+                    alert("책을 열 수 없습니다", Library.reason(e));
+                  });
+            }
+          });
+      return;
+    }
+    openArchiveReady(b, token);
+  }
+
+  void openArchiveReady(Library.Book b, int token) {
     readerIO.execute(
         () -> {
           try {
-            boolean fetching = WebDav.isUrl(b.url) && !RemoteBooks.has(this, b.url);
-            // 받는 동안 화면이 꺼져 연결이 끊기지 않게 한다.
-            if (fetching)
-              runOnUiThread(
-                  () -> {
-                    if (token == requestId && !isDestroyed())
-                      getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                  });
-            if (fetching) {
-              String origin = WebDav.isPikPak(b.url) ? "PikPak" : "PC";
-              final long[] speedState = {0L, 0L};
-              // 원격 책은 처음 열 때 권 전체를 받아 보관함에 저장한 뒤 연다(이후 오프라인으로도 열림).
-              RemoteBooks.download(
-                  this,
-                  b.url,
-                  db.httpAuth(b.source),
-                  new RemoteBooks.Progress() {
-                    public void update(long done, long total) {
-                      long now = System.currentTimeMillis();
-                      if (speedState[0] == 0L) {
-                        speedState[0] = now;
-                        speedState[1] = done;
-                      }
-                      String rate = formatSpeed(done - speedState[1], now - speedState[0]);
-                      runOnUiThread(
-                          () -> {
-                            if (token != requestId || isDestroyed()) return;
-                            scanMessage =
-                                String.format(
-                                    Locale.KOREA,
-                                    "%s에서 받는 중 %d%%  ·  %d / %dMB%s",
-                                    origin,
-                                    total > 0 ? done * 100 / total : 0,
-                                    done >> 20,
-                                    total >> 20,
-                                    rate);
-                            updateScanBanner();
-                          });
-                    }
-
-                    public boolean cancelled() {
-                      return token != requestId || isDestroyed();
-                    }
-                  },
-                  cancel);
-            }
             if (token != requestId || isDestroyed()) return;
             Archive a = db.open(b);
             if (a.comicInfo != null && b.comicSeries.isEmpty() && b.comicNumber.isEmpty()) {
@@ -4501,17 +4515,9 @@ public final class Main extends Activity {
                   scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
                   updateScanBanner();
                   if (e instanceof InterruptedIOException) return;
-                  if (e instanceof RemoteBooks.Incomplete) {
-                    RemoteBooks.Incomplete x = (RemoteBooks.Incomplete) e;
-                    alert(
-                        "받기가 중간에 끊겼습니다",
-                        (x.total > 0 ? x.done * 100 / x.total : 0)
-                            + "%까지 휴대폰에 저장했습니다. 책을 다시 누르면 이어서 받습니다.\n\n원인: "
-                            + Library.reason(e));
-                  } else alert("책을 열 수 없습니다", Library.reason(e));
+                  alert("책을 열 수 없습니다", Library.reason(e));
                 });
           } finally {
-            if (cancel != null && activeDownload == cancel) activeDownload = null;
             runOnUiThread(
                 () -> {
                   if (token == requestId && !isDestroyed())
@@ -4881,8 +4887,38 @@ public final class Main extends Activity {
     }
   }
 
+  protected void onResume() {
+    super.onResume();
+    DownloadService.setListener(downloadListener);
+    if (DownloadService.isRunning()) {
+      activeDownloadSession = DownloadService.activeSessionId();
+      loadingBook = true;
+      scanMessage = DownloadService.currentBanner();
+      if (reader == null) updateScanBanner();
+      getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    } else {
+      if (loadingBook && activeDownloadSession > 0) {
+        activeDownloadSession = 0;
+        loadingBook = false;
+        scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+        if (reader == null) updateScanBanner();
+        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+      }
+      if (DownloadService.consumePendingRefresh() && reader == null && db != null) {
+        refreshRemoteEntries();
+      }
+      long openId = DownloadService.consumePendingOpenBookId();
+      if (openId > 0 && reader == null && db != null) {
+        Library.Book doneBook = db.get(openId);
+        if (doneBook != null && RemoteBooks.has(this, doneBook.url)) open(doneBook);
+      }
+    }
+  }
+
   protected void onPause() {
     if (reader != null) reader.storeScroll();
+    // 백그라운드로 이동해도 DownloadService는 계속 실행되도록 리스너만 분리한다.
+    DownloadService.setListener(null);
     super.onPause();
   }
 
@@ -4928,14 +4964,8 @@ public final class Main extends Activity {
   protected void onDestroy() {
     if (dragController != null) dragController.cancel();
     if (reader != null) reader.close();
-    RemoteBooks.Cancel c = activeDownload;
-    activeDownload = null;
-    if (c != null) {
-      c.markCancelled();
-      Thread t = new Thread(c::cancel, "ccomics-cancel-destroy");
-      t.setDaemon(true);
-      t.start();
-    }
+    // 포그라운드 서비스로 실행 중인 백그라운드 다운로드는 Activity가 내려가도 유지한다.
+    DownloadService.setListener(null);
     handler.removeCallbacks(refresh);
     if (pendingThumbResize != null) handler.removeCallbacks(pendingThumbResize);
     worker.shutdown();

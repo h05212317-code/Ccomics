@@ -639,6 +639,14 @@ public class RemoteBooksTest {
       assertEquals(1L, lib.remoteSources().get(0).id);
       assertFalse(RemoteBooks.has(host, pikCached));
       assertEquals(0, lib.sourceBookCount(2));
+
+      // 같은 URL의 원격 ZIP 크기가 바뀌면(페이지 추가 교체 등) 예전 보관함 캐시를 자동 무효화한다.
+      assertTrue(RemoteBooks.file(host, pcUrl).createNewFile());
+      assertTrue(RemoteBooks.has(host, pcUrl));
+      List<Long> pending = new ArrayList<>();
+      lib.record(1, pcUrl, "pc-1.zip", "https://pc.example/ccomics/", 250, 10000L, 99L, pending);
+      assertFalse(RemoteBooks.has(host, pcUrl));
+      assertFalse(pending.isEmpty());
     } finally {
       RemoteBooks.clear(host);
     }

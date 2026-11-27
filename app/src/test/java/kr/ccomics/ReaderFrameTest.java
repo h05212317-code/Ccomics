@@ -231,6 +231,55 @@ public class ReaderFrameTest {
   }
 
   @Test
+  public void longPressEdgeMovesNextAndPreviousVolumeWhenEnabled() {
+    host.reader = reader;
+    host.prefs.edit().putBoolean("autoNext", false).putBoolean("longPressVolume", true).apply();
+    reader.readGestures();
+    reader.rtl = true; // RTL: 왼쪽=다음, 오른쪽=이전
+    reader.layout(0, 0, 1000, 1600);
+    // 3권 시리즈(1, 2, 3)에서 현재 2권(reader.book.id == 1을 2번으로 구성)
+    Library.Book prev = host.db.get(1);
+    prev.id = 100;
+    prev.title = "테스트 1권";
+    Library.Book cur = reader.book;
+    cur.grp = "series:lp";
+    Library.Book next = host.db.get(1);
+    next.id = 200;
+    next.title = "테스트 3권";
+    host.groups.put("series:lp", java.util.Arrays.asList(prev, cur, next));
+
+    // 왼쪽(다음 영역) 꾹 누르기 -> 다음 권 확인 다이얼로그
+    android.view.MotionEvent leftPress = android.view.MotionEvent.obtain(0, 0, 0, 100f, 800f, 0);
+    assertTrue(reader.handleLongPress(leftPress));
+    leftPress.recycle();
+    android.app.AlertDialog nextDlg = org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog();
+    assertNotNull(nextDlg);
+    assertEquals("테스트 3권", org.robolectric.Shadows.shadowOf(nextDlg).getMessage().toString());
+    nextDlg.dismiss();
+
+    // 오른쪽(이전 영역) 꾹 누르기 -> 이전 권 확인 다이얼로그
+    android.view.MotionEvent rightPress = android.view.MotionEvent.obtain(0, 0, 0, 900f, 800f, 0);
+    assertTrue(reader.handleLongPress(rightPress));
+    rightPress.recycle();
+    android.app.AlertDialog prevDlg = org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog();
+    assertNotNull(prevDlg);
+    assertEquals("테스트 1권", org.robolectric.Shadows.shadowOf(prevDlg).getMessage().toString());
+    prevDlg.dismiss();
+
+    // 가운데 영역 꾹 누르기 -> 동작 안 함
+    android.view.MotionEvent midPress = android.view.MotionEvent.obtain(0, 0, 0, 500f, 800f, 0);
+    assertFalse(reader.handleLongPress(midPress));
+    midPress.recycle();
+
+    // 설정 OFF 시 동작 안 함
+    host.prefs.edit().putBoolean("longPressVolume", false).apply();
+    reader.readGestures();
+    android.view.MotionEvent offPress = android.view.MotionEvent.obtain(0, 0, 0, 100f, 800f, 0);
+    assertFalse(reader.handleLongPress(offPress));
+    offPress.recycle();
+  }
+
+  @Test
   public void seekBarTouchFollowsDirection() {
     host.reader = reader;
     host.frame = new android.widget.FrameLayout(host);

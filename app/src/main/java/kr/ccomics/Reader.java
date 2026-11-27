@@ -26,7 +26,7 @@ final class Reader extends View {
   final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
   final GestureDetector immediateTaps, centerDoubleTaps;
   GestureDetector activeTaps;
-  boolean doubleZoom, pinchZoom, tapTurn, swipeTurn, brightnessGesture;
+  boolean doubleZoom, pinchZoom, tapTurn, swipeTurn, longPressVolume = true, brightnessGesture;
   static final float TAP_MIN_EDGE = 0.05f;
   static final float TAP_MIN_CENTER = 0.08f;
   boolean brightnessDrag, skipTouch, tapStartedTurn;
@@ -121,6 +121,10 @@ final class Reader extends View {
             return true;
           }
 
+          public void onLongPress(MotionEvent e) {
+            handleLongPress(e);
+          }
+
           public boolean onFling(MotionEvent a, MotionEvent b, float vx, float vy) {
             if (mode == 3 && zoom == 1 && !pinched) {
               fling.fling(0, 0, 0, (int) -vy, 0, 0, -100000, 100000);
@@ -186,11 +190,30 @@ final class Reader extends View {
     return true;
   }
 
+  boolean handleLongPress(MotionEvent e) {
+    if (!longPressVolume
+        || closed
+        || pinched
+        || drag
+        || brightnessDrag
+        || pinch.isInProgress()
+        || zoom > 1
+        || host.overlay != null
+        || center(e.getX())) return false;
+    skipTouch = true;
+    cancelTurn();
+    performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+    if (inLeftZone(e.getX()) == rtl) host.nextVolume();
+    else host.previousVolume();
+    return true;
+  }
+
   void readGestures() {
     doubleZoom = host.prefs.getBoolean("doubleZoom", false);
     pinchZoom = host.prefs.getBoolean("pinchZoom", true);
     tapTurn = host.prefs.getBoolean("tapTurn", true);
     swipeTurn = host.prefs.getBoolean("swipeTurn", true);
+    longPressVolume = host.prefs.getBoolean("longPressVolume", true);
     tapEffect = host.prefs.getInt("tapEffect", 2);
     brightnessGesture = host.prefs.getBoolean("brightnessGesture", false);
     int legacyIdx = Math.max(0, Math.min(2, host.prefs.getInt("tapWidth", 1)));

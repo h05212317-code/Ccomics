@@ -988,6 +988,13 @@ final class Library extends SQLiteOpenHelper {
           exec("UPDATE books SET grp=?,series=?,rating=? WHERE id=?", group, series, rating, id);
         }
         if (c.getInt(7) == -1) exec("UPDATE books SET manualGroup=? WHERE id=?", manual, id);
+        boolean contentChanged =
+            c.getLong(1) != size
+                || (c.getLong(2) > 0 && changed > 0 && Math.abs(changed - c.getLong(2)) > 2000L);
+        if (contentChanged && WebDav.isUrl(url) && RemoteBooks.hasAny(ctx, url)) {
+          // 원격 ZIP이 같은 이름으로 교체(페이지 추가 등)되었으면 예전 보관함 캐시를 비워 최신본을 반영한다.
+          RemoteBooks.delete(ctx, RemoteBooks.fileName(url));
+        }
         if (c.getLong(1) != size
             || c.getLong(2) != changed
             || c.getInt(3) == 0
