@@ -248,4 +248,97 @@ public class WebDavTest {
       s.shutdown();
     }
   }
+
+  @Test
+  public void parallelWebDavScanUsesKnownSizeAndDoesNotPrefetchExtraPages() throws Exception {
+    // 1장 표지(작은 PNG) + 10장의 큰 더미 페이지가 든 ZIP: 표지 스캔 시 뒤쪽 페이지를 받지 않아야 한다.
+    android.graphics.Bitmap bmp =
+        android.graphics.Bitmap.createBitmap(16, 24, android.graphics.Bitmap.Config.ARGB_8888);
+    ByteArrayOutputStream png = new ByteArrayOutputStream();
+    bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, png);
+    bmp.recycle();
+    byte[] coverBytes = png.toByteArray();
+    byte[] filler = new byte[400_000];
+    new Random(17).nextBytes(filler);
+
+    ByteArrayOutputStream sink = new ByteArrayOutputStream();
+    try (ZipArchiveOutputStream zos = new ZipArchiveOutputStream(sink)) {
+      BundleTest.put(zos, "001.png", coverBytes, true);
+      for (int p = 2; p <= 10; p++) {
+        BundleTest.put(zos, String.format("%03d.jpg", p), filler, true);
+      }
+    }
+    byte[] zipBytes = sink.toByteArray();
+    String auth = WebDav.auth("pik", "pw");
+    java.util.concurrent.atomic.AtomicInteger gatewayGetCount =
+        new java.util.concurrent.atomic.AtomicInteger();
+    java.util.concurrent.atomic.AtomicLong bytesServed =
+        new java.util.concurrent.atomic.AtomicLong();
+    MockWebServer s = new MockWebServer();
+    s.setDispatcher(
+        new Dispatcher() {
+          public MockResponse dispatch(RecordedRequest r) {
+            String path = r.getPath();
+            if (path.startsWith("/cdn/")) {
+              String range = r.getHeader("Range");
+              Matcher m =
+                  Pattern.compile("bytes=([0-9]+)-([0-9]+)").matcher(range == null ? "" : range);
+              if (!m.matches()) return new MockResponse().setResponseCode(400);
+              long start = Long.parseLong(m.group(1));
+              long end = Math.min(zipBytes.length - 1, Long.parseLong(m.group(2)));
+              bytesServed.addAndGet(end - start + 1);
+              return new MockResponse()
+                  .setResponseCode(206)
+                  .setHeader("Content-Range", "bytes " + start + "-" + end + "/" + zipBytes.length)
+                  .setBody(
+                      new Buffer().write(Arrays.copyOfRange(zipBytes, (int) start, (int) end + 1)));
+            }
+            if (!auth.equals(r.getHeader("Authorization")))
+              return new MockResponse().setResponseCode(401);
+            if ("PROPFIND".equals(r.getMethod())) {
+              String xml;
+              if (path.equals("/root/")) {
+                xml =
+                    "<D:response><D:href>/root/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>"
+                        + "<D:response><D:href>/root/seriesA/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>"
+                        + "<D:response><D:href>/root/seriesB/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>";
+              } else {
+                String prefix = path;
+                xml =
+                    "<D:response><D:href>" + prefix + "</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>"
+                        + "<D:response><D:href>" + prefix + "vol1.zip</D:href><D:propstat><D:prop><D:resourcetype/><D:getcontentlength>"
+                        + zipBytes.length + "</D:getcontentlength></D:prop></D:propstat></D:response>"
+                        + "<D:response><D:href>" + prefix + "vol2.zip</D:href><D:propstat><D:prop><D:resourcetype/><D:getcontentlength>"
+                        + zipBytes.length + "</D:getcontentlength></D:prop></D:propstat></D:response>";
+              }
+              return new MockResponse()
+                  .setResponseCode(207)
+                  .setBody("<?xml version=\"1.0\"?><D:multistatus xmlns:D=\"DAV:\">" + xml + "</D:multistatus>");
+            }
+            gatewayGetCount.incrementAndGet();
+            return new MockResponse().setResponseCode(302).setHeader("Location", "/cdn" + path);
+          }
+        });
+    s.start();
+    Context ctx = RuntimeEnvironment.getApplication();
+    WebDav.Cache.clear(ctx);
+    try (Library lib = new Library(ctx)) {
+      String root = s.url("/root/").toString();
+      long sid = lib.register(root, "pik", "pw");
+      lib.scan(sid, () -> {});
+      List<Library.Book> books = lib.books();
+      assertEquals(4, books.size());
+      for (Library.Book b : books) {
+        assertEquals(10, b.pages);
+        assertTrue(lib.coverFile(b.id).isFile());
+      }
+      // 4권 각각 게이트웨이는 딱 1회(tail 302)만 거치고, 뒤쪽 9장(3.6MB*4=14.4MB)은 받지 않는다.
+      assertEquals(4, gatewayGetCount.get());
+      assertTrue(
+          "served too many bytes during cover scan: " + bytesServed.get(),
+          bytesServed.get() < (long) zipBytes.length * 2);
+    } finally {
+      s.shutdown();
+    }
+  }
 }

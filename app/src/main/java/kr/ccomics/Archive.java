@@ -369,10 +369,15 @@ final class Archive implements Closeable {
   }
 
   Archive(Context ctx, String address, CIFSContext server) throws Exception {
-    this(ctx, address, server, "");
+    this(ctx, address, server, "", -1L);
   }
 
   Archive(Context ctx, String address, CIFSContext server, String httpAuth) throws Exception {
+    this(ctx, address, server, httpAuth, -1L);
+  }
+
+  Archive(Context ctx, String address, CIFSContext server, String httpAuth, long knownSize)
+      throws Exception {
     SeekableByteChannel channel;
     File temp = null;
     int split = address.indexOf(NESTED);
@@ -380,7 +385,7 @@ final class Archive implements Closeable {
     if (split >= 0) address = address.substring(0, split);
     if (address.startsWith("smb://")) channel = new RemoteChannel(new SmbFile(address, server));
     else if (WebDav.isUrl(address)) {
-      WebDav.Channel web = new WebDav.Channel(ctx, address, httpAuth);
+      WebDav.Channel web = new WebDav.Channel(ctx, address, httpAuth, split < 0 ? knownSize : -1L);
       remote = web.cache;
       channel = web;
     }
@@ -551,7 +556,16 @@ final class Archive implements Closeable {
   }
 
   Bitmap decode(int i, int width, int height) throws IOException {
-    prefetch(i, 8);
+    return decode(i, width, height, true);
+  }
+
+  /** 표지 스캔용: 다음 8페이지를 미리 받지 않고 해당 표지 1장 범위만 정확히 읽는다. */
+  Bitmap decodeCover(int i, int width, int height) throws IOException {
+    return decode(i, width, height, false);
+  }
+
+  private Bitmap decode(int i, int width, int height, boolean aheadPages) throws IOException {
+    prefetch(i, aheadPages ? 8 : 1);
     ZipArchiveEntry e = pages.get(i);
     if (!zip.canReadEntryData(e)) throw new IOException("암호화 또는 지원하지 않는 ZIP 압축 방식입니다.");
     if (e.getSize() < 1 || e.getSize() > MAX_PAGE) throw new IOException("이미지 파일 크기를 읽을 수 없습니다.");

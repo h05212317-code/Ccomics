@@ -542,24 +542,26 @@ public class RemoteBooksTest {
 
   @Test
   public void pikpakConcurrencySettingsAnd429RedirectDownload() throws Exception {
-    assertEquals(RemoteBooks.PIKPAK_PARALLEL, RemoteBooks.parallelFor("https://dav.pikpak.ai/a.zip"));
+    assertEquals(6, RemoteBooks.parallelFor("https://dav.pikpak.ai/a.zip"));
     assertEquals(RemoteBooks.PIKPAK_PIECE, RemoteBooks.pieceFor("https://dav.pikpak.ai/a.zip"));
     assertEquals(RemoteBooks.PARALLEL, RemoteBooks.parallelFor("https://pc.ts.net/ccomics/a.zip"));
     assertEquals(RemoteBooks.PIECE, RemoteBooks.pieceFor("https://pc.ts.net/ccomics/a.zip"));
 
     byte[] bytes = new byte[5_000_000];
     new Random(11).nextBytes(bytes);
-    AtomicInteger hits = new AtomicInteger();
+    AtomicInteger gatewayHits = new AtomicInteger();
+    AtomicInteger cdnHits = new AtomicInteger();
     MockWebServer s = new MockWebServer();
     s.setDispatcher(
         new Dispatcher() {
           public MockResponse dispatch(RecordedRequest r) {
             if (r.getPath().startsWith("/cdn/")) {
-              if (hits.incrementAndGet() == 2) {
+              if (cdnHits.incrementAndGet() == 2) {
                 return new MockResponse().setResponseCode(429).setHeader("Retry-After", "1");
               }
               return range(bytes, r, 512_000);
             }
+            gatewayHits.incrementAndGet();
             return new MockResponse().setResponseCode(302).setHeader("Location", "/cdn/pik.zip");
           }
         });
@@ -570,6 +572,9 @@ public class RemoteBooksTest {
     try {
       File out = RemoteBooks.download(ctx, url, WebDav.auth("u", "p"), quiet());
       assertArrayEquals(bytes, java.nio.file.Files.readAllBytes(out.toPath()));
+      // probe에서 1회 302로 얻은 CDN 주소를 모든 조각이 재사용하므로 게이트웨이는 1번만 호출된다.
+      assertEquals("gateway should only be hit once", 1, gatewayHits.get());
+      assertTrue("cdn should serve pieces", cdnHits.get() >= 3);
     } finally {
       RemoteBooks.clear(ctx);
       s.shutdown();

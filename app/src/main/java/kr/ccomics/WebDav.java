@@ -286,6 +286,8 @@ final class WebDav {
     static final Map<String, Cache> OPEN = new HashMap<>();
 
     final String url, auth, key, stamp;
+    volatile String directUrl;
+    volatile boolean directNeedsAuth;
     final File data, map;
     final long length;
     final int chunks;
@@ -305,6 +307,11 @@ final class WebDav {
     }
 
     static Cache open(android.content.Context ctx, String url, String auth) throws IOException {
+      return open(ctx, url, auth, -1L);
+    }
+
+    static Cache open(android.content.Context ctx, String url, String auth, long knownSize)
+        throws IOException {
       String key = Integer.toHexString(url.hashCode()) + "-" + Integer.toHexString(url.length());
       synchronized (OPEN) {
         Cache c = OPEN.get(key);
@@ -312,7 +319,7 @@ final class WebDav {
           c.refs++;
           return c;
         }
-        c = new Cache(dir(ctx), url, auth, key);
+        c = new Cache(dir(ctx), url, auth, key, knownSize);
         c.refs = 1;
         OPEN.put(key, c);
         prune(dir(ctx));
@@ -349,18 +356,19 @@ final class WebDav {
       }
     }
 
-    private Cache(File dir, String url, String auth, String key) throws IOException {
+    private Cache(File dir, String url, String auth, String key, long knownSize) throws IOException {
       this.url = url;
       this.auth = auth;
       this.key = key;
       data = new File(dir, key + ".part");
       map = new File(dir, key + ".map");
-      // 끝부분(ZIP 목차)을 먼저 받으며 전체 크기·수정 시각을 확인한다.
-      // 일부 클라우드 WebDAV(예: PikPak)가 bytes=- 접미사 Range를 거부할 수 있어 HEAD/bytes=0-0 폴백을 둔다.
-      TailResult tr = fetchTail(url, auth);
+      // 끝부분(ZIP 목차)을 먼저 받으며 전체 크기·수정 시각·최종 리디렉션(CDN) 주소를 확인한다.
+      TailResult tr = fetchTail(url, auth, knownSize);
       byte[] tail = tr.tail;
       long size = tr.size;
       String mark = tr.mark;
+      this.directUrl = tr.directUrl;
+      this.directNeedsAuth = tr.directNeedsAuth;
       length = size;
       stamp = mark;
       chunks = (int) ((length + CHUNK - 1) / CHUNK);
@@ -394,12 +402,32 @@ final class WebDav {
       final byte[] tail;
       final long size;
       final String mark;
+      final String directUrl;
+      final boolean directNeedsAuth;
 
-      TailResult(byte[] tail, long size, String mark) {
+      TailResult(byte[] tail, long size, String mark, String directUrl, boolean directNeedsAuth) {
         this.tail = tail;
         this.size = size;
         this.mark = mark;
+        this.directUrl = directUrl;
+        this.directNeedsAuth = directNeedsAuth;
       }
+    }
+
+    private static boolean sameHost(String a, String b) {
+      HttpUrl ua = HttpUrl.parse(a), ub = HttpUrl.parse(b);
+      return ua != null
+          && ub != null
+          && ua.host().equalsIgnoreCase(ub.host())
+          && ua.port() == ub.port()
+          && ua.scheme().equalsIgnoreCase(ub.scheme());
+    }
+
+    private static TailResult makeTail(String origUrl, Response res, byte[] tail, long total, String lastMod) {
+      String resolved = res.request().url().toString();
+      boolean keepAuth = sameHost(origUrl, resolved);
+      String lm = lastMod != null && !lastMod.isEmpty() ? lastMod : res.header("Last-Modified", "");
+      return new TailResult(tail, total, total + "|" + lm, resolved, keepAuth);
     }
 
     private static long parseContentRangeTotal(String cr) {
@@ -414,8 +442,42 @@ final class WebDav {
       }
     }
 
-    private static TailResult fetchTail(String url, String auth) throws IOException {
+    private static TailResult fetchTail(String url, String auth, long knownSize) throws IOException {
       long tailSpan = 4L * CHUNK;
+      // 0) PROPFIND 등으로 전체 크기를 이미 알고 있으면 명시적 bytes=start-end 1회 요청으로 끝낸다(bytes=- 미지원 서버도 1-RTT).
+      if (knownSize > 0) {
+        long tailStart = Math.max(0L, knownSize - tailSpan);
+        for (int attempt = 0; attempt < 3; attempt++) {
+          Request.Builder req =
+              new Request.Builder()
+                  .url(url)
+                  .header("Range", "bytes=" + tailStart + "-" + (knownSize - 1));
+          if (!auth.isEmpty()) req.header("Authorization", auth);
+          try (Response res = call(req.build())) {
+            if ((res.code() == 429 || res.code() == 503) && attempt < 2) {
+              sleepRetry(res, attempt);
+              continue;
+            }
+            if (res.code() == 206) {
+              long total = parseContentRangeTotal(res.header("Content-Range", ""));
+              if (total == knownSize) {
+                ResponseBody body = res.body();
+                if (body == null) throw new IOException(targetName(url) + "가 빈 응답을 보냈습니다.");
+                return makeTail(url, res, body.bytes(), total, res.header("Last-Modified", ""));
+              }
+            } else if (res.code() == 200 && tailStart == 0) {
+              ResponseBody body = res.body();
+              if (body != null && body.contentLength() <= tailSpan) {
+                byte[] all = body.bytes();
+                return makeTail(url, res, all, all.length, res.header("Last-Modified", ""));
+              }
+            }
+            if (res.code() == 401 || res.code() == 403 || res.code() == 404)
+              throw fail(res.code(), url);
+            break; // 파일 크기가 바뀌었거나 예외 응답이면 일반 탐색으로 폴백
+          }
+        }
+      }
       // 1) 1회 왕복으로 끝부분을 바로 요청(bytes=-N).
       for (int attempt = 0; attempt < 3; attempt++) {
         Request.Builder req =
@@ -431,16 +493,14 @@ final class WebDav {
             if (total > 0) {
               ResponseBody body = res.body();
               if (body == null) throw new IOException(targetName(url) + "가 빈 응답을 보냈습니다.");
-              byte[] tail = body.bytes();
-              return new TailResult(tail, total, total + "|" + res.header("Last-Modified", ""));
+              return makeTail(url, res, body.bytes(), total, res.header("Last-Modified", ""));
             }
           }
           if (res.code() == 200) {
             long cl = res.body() != null ? res.body().contentLength() : -1;
             if (cl > 0 && cl <= tailSpan) {
               byte[] all = res.body().bytes();
-              return new TailResult(
-                  all, all.length, all.length + "|" + res.header("Last-Modified", ""));
+              return makeTail(url, res, all, all.length, res.header("Last-Modified", ""));
             }
           }
           if (res.code() == 401 || res.code() == 403 || res.code() == 404)
@@ -451,6 +511,8 @@ final class WebDav {
       // 2) 폴백: HEAD 또는 bytes=0-0으로 전체 크기를 먼저 확인한 뒤 명시적 bytes=start-end 요청.
       long total = -1;
       String lastMod = "";
+      String resolvedUrl = url;
+      boolean resolvedNeedsAuth = true;
       Request.Builder headReq = new Request.Builder().url(url).head();
       if (!auth.isEmpty()) headReq.header("Authorization", auth);
       try (Response res = call(headReq.build())) {
@@ -464,6 +526,8 @@ final class WebDav {
           } catch (NumberFormatException ignored) {
           }
           lastMod = res.header("Last-Modified", "");
+          resolvedUrl = res.request().url().toString();
+          resolvedNeedsAuth = sameHost(url, resolvedUrl);
         }
       }
       if (total <= 0) {
@@ -473,9 +537,13 @@ final class WebDav {
           if (res.code() == 206) {
             total = parseContentRangeTotal(res.header("Content-Range", ""));
             if (lastMod.isEmpty()) lastMod = res.header("Last-Modified", "");
+            resolvedUrl = res.request().url().toString();
+            resolvedNeedsAuth = sameHost(url, resolvedUrl);
           } else if (res.code() == 200 && res.body() != null && res.body().contentLength() > 0) {
             total = res.body().contentLength();
             if (lastMod.isEmpty()) lastMod = res.header("Last-Modified", "");
+            resolvedUrl = res.request().url().toString();
+            resolvedNeedsAuth = sameHost(url, resolvedUrl);
           } else {
             throw fail(res.code() == 200 ? 416 : res.code(), url);
           }
@@ -486,9 +554,9 @@ final class WebDav {
       for (int attempt = 0; attempt < 3; attempt++) {
         Request.Builder req =
             new Request.Builder()
-                .url(url)
+                .url(resolvedUrl)
                 .header("Range", "bytes=" + tailStart + "-" + (total - 1));
-        if (!auth.isEmpty()) req.header("Authorization", auth);
+        if (resolvedNeedsAuth && !auth.isEmpty()) req.header("Authorization", auth);
         try (Response res = call(req.build())) {
           if ((res.code() == 429 || res.code() == 503) && attempt < 2) {
             sleepRetry(res, attempt);
@@ -498,9 +566,7 @@ final class WebDav {
             throw fail(res.code() == 200 ? 416 : res.code(), url);
           ResponseBody body = res.body();
           if (body == null) throw new IOException(targetName(url) + "가 빈 응답을 보냈습니다.");
-          byte[] tail = body.bytes();
-          if (lastMod.isEmpty()) lastMod = res.header("Last-Modified", "");
-          return new TailResult(tail, total, total + "|" + lastMod);
+          return makeTail(url, res, body.bytes(), total, lastMod);
         }
       }
       throw fail(429, url);
@@ -613,17 +679,32 @@ final class WebDav {
           end = p[1];
           level = p[2];
         }
+        String fetchUrl = directUrl != null ? directUrl : url;
+        boolean useAuth = directUrl == null || directNeedsAuth;
         Request.Builder req =
             new Request.Builder()
-                .url(url)
+                .url(fetchUrl)
                 .header("Range", "bytes=" + (long) start * CHUNK + "-" + (chunkEnd(end) - 1));
-        if (!auth.isEmpty()) req.header("Authorization", auth);
+        if (useAuth && !auth.isEmpty()) req.header("Authorization", auth);
         Call current = CLIENT.newCall(req.build());
         synchronized (this) {
           call = current;
         }
         try (Response res = current.execute()) {
+          if ((res.code() == 401 || res.code() == 403 || res.code() == 404 || res.code() == 410)
+              && directUrl != null
+              && !directUrl.equals(url)) {
+            // CDN 임시 서명 링크가 만료됐으면 원래 WebDAV 주소로 1회 재발급받는다.
+            directUrl = null;
+            directNeedsAuth = true;
+            continue;
+          }
           if (res.code() != 206) throw fail(res.code() == 200 ? 416 : res.code(), url);
+          if (directUrl == null) {
+            String resolved = res.request().url().toString();
+            directUrl = resolved;
+            directNeedsAuth = sameHost(url, resolved);
+          }
           ResponseBody body = res.body();
           if (body == null) throw new IOException(targetName(url) + "가 빈 응답을 보냈습니다.");
           InputStream in = body.byteStream();
@@ -724,7 +805,12 @@ final class WebDav {
     boolean open = true;
 
     Channel(android.content.Context ctx, String url, String auth) throws IOException {
-      cache = Cache.open(ctx, url, auth);
+      this(ctx, url, auth, -1L);
+    }
+
+    Channel(android.content.Context ctx, String url, String auth, long knownSize)
+        throws IOException {
+      cache = Cache.open(ctx, url, auth, knownSize);
     }
 
     public int read(ByteBuffer dst) throws IOException {

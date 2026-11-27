@@ -3870,9 +3870,21 @@ public final class Main extends Activity {
             try {
               db.scan(
                   id,
-                  () -> {
-                    handler.removeCallbacks(refresh);
-                    handler.postDelayed(refresh, 650);
+                  new Library.Notice() {
+                    public void changed() {
+                      handler.removeCallbacks(refresh);
+                      handler.postDelayed(refresh, 650);
+                    }
+
+                    public void progress(int done, int total) {
+                      if (total <= 1) return;
+                      runOnUiThread(
+                          () -> {
+                            if (isDestroyed() || loadingBook) return;
+                            scanMessage = "책과 표지를 확인하고 있습니다… (" + done + " / " + total + ")";
+                            updateScanBanner();
+                          });
+                    }
                   });
             } catch (Exception e) {
               String reason = Library.reason(e);
@@ -4347,12 +4359,19 @@ public final class Main extends Activity {
               }
               int pos = idx + 1, count = targets.size();
               String origin = WebDav.isPikPak(b.url) ? "PikPak" : "PC";
+              final long[] speedState = {0L, 0L}; // [startTimeMs, startBytes]
               RemoteBooks.download(
                   this,
                   b.url,
                   db.httpAuth(b.source),
                   new RemoteBooks.Progress() {
                     public void update(long done, long total) {
+                      long now = System.currentTimeMillis();
+                      if (speedState[0] == 0L) {
+                        speedState[0] = now;
+                        speedState[1] = done;
+                      }
+                      String rate = formatSpeed(done - speedState[1], now - speedState[0]);
                       runOnUiThread(
                           () -> {
                             if (token != requestId || isDestroyed()) return;
@@ -4360,12 +4379,13 @@ public final class Main extends Activity {
                             scanMessage =
                                 String.format(
                                     Locale.KOREA,
-                                    "%s%s에서 미리 받는 중 %d%%  ·  %d / %dMB",
+                                    "%s%s에서 미리 받는 중 %d%%  ·  %d / %dMB%s",
                                     prefix,
                                     origin,
                                     total > 0 ? done * 100 / total : 0,
                                     done >> 20,
-                                    total >> 20);
+                                    total >> 20,
+                                    rate);
                             updateScanBanner();
                           });
                     }
@@ -4423,6 +4443,13 @@ public final class Main extends Activity {
         });
   }
 
+  static String formatSpeed(long deltaBytes, long elapsedMs) {
+    if (deltaBytes <= 0 || elapsedMs < 500) return "";
+    double mbPerSec = (deltaBytes / (double) (1 << 20)) / (elapsedMs / 1000.0);
+    if (mbPerSec < 0.05) return "";
+    return String.format(Locale.KOREA, "  ·  %.1fMB/s", mbPerSec);
+  }
+
   void open(Library.Book b) {
     remember();
     resumeDismissed = false;
@@ -4446,6 +4473,7 @@ public final class Main extends Activity {
                   });
             if (fetching) {
               String origin = WebDav.isPikPak(b.url) ? "PikPak" : "PC";
+              final long[] speedState = {0L, 0L};
               // 원격 책은 처음 열 때 권 전체를 받아 보관함에 저장한 뒤 연다(이후 오프라인으로도 열림).
               RemoteBooks.download(
                   this,
@@ -4453,17 +4481,24 @@ public final class Main extends Activity {
                   db.httpAuth(b.source),
                   new RemoteBooks.Progress() {
                     public void update(long done, long total) {
+                      long now = System.currentTimeMillis();
+                      if (speedState[0] == 0L) {
+                        speedState[0] = now;
+                        speedState[1] = done;
+                      }
+                      String rate = formatSpeed(done - speedState[1], now - speedState[0]);
                       runOnUiThread(
                           () -> {
                             if (token != requestId || isDestroyed()) return;
                             scanMessage =
                                 String.format(
                                     Locale.KOREA,
-                                    "%s에서 받는 중 %d%%  ·  %d / %dMB",
+                                    "%s에서 받는 중 %d%%  ·  %d / %dMB%s",
                                     origin,
                                     total > 0 ? done * 100 / total : 0,
                                     done >> 20,
-                                    total >> 20);
+                                    total >> 20,
+                                    rate);
                             updateScanBanner();
                           });
                     }

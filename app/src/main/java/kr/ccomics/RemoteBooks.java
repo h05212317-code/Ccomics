@@ -23,8 +23,8 @@ import okhttp3.*;
 final class RemoteBooks {
   /** Funnel 실측: 연결 1개 0.47MB/s, 4개 1.74MB/s, 8개 2.31MB/s, 16개 2.38MB/s. */
   static final int PARALLEL = 8, PIECE = 2 << 20, ATTEMPTS = 8;
-  /** PikPak WebDAV는 동시 연결이 과하면 429 제한이 걸릴 수 있어 연결 수를 낮추고 조각을 키운다. */
-  static final int PIKPAK_PARALLEL = 3, PIKPAK_PIECE = 4 << 20;
+  /** PikPak은 probe에서 1회 302로 얻은 CDN 직링크를 6개 연결로 직접 받아 게이트웨이 429를 피하면서 대역폭을 뽑는다. */
+  static final int PIKPAK_PARALLEL = 6, PIKPAK_PIECE = 4 << 20;
 
   static int parallelFor(String url) {
     return WebDav.isPikPak(url) ? PIKPAK_PARALLEL : PARALLEL;
@@ -335,7 +335,28 @@ final class RemoteBooks {
     }
   }
 
-  private static long probe(String url, String auth, Cancel cancel, Progress progress)
+  private static final class ProbeResult {
+    final long total;
+    final String directUrl;
+    final boolean directNeedsAuth;
+
+    ProbeResult(long total, String directUrl, boolean directNeedsAuth) {
+      this.total = total;
+      this.directUrl = directUrl;
+      this.directNeedsAuth = directNeedsAuth;
+    }
+  }
+
+  private static boolean sameHost(String a, String b) {
+    HttpUrl ua = HttpUrl.parse(a), ub = HttpUrl.parse(b);
+    return ua != null
+        && ub != null
+        && ua.host().equalsIgnoreCase(ub.host())
+        && ua.port() == ub.port()
+        && ua.scheme().equalsIgnoreCase(ub.scheme());
+  }
+
+  private static ProbeResult probe(String url, String auth, Cancel cancel, Progress progress)
       throws IOException {
     IOException last = null;
     for (int attempt = 0; attempt < ATTEMPTS; attempt++) {
@@ -348,17 +369,20 @@ final class RemoteBooks {
           pauseMs(WebDav.retryDelayMs(res, attempt), cancel, progress);
           continue;
         }
+        String resolved = res.request().url().toString();
+        boolean keepAuth = sameHost(url, resolved);
         if (res.code() == 206) {
           String cr = res.header("Content-Range", "");
           int slash = cr.lastIndexOf('/');
           if (slash < 0)
             throw new IOException(
                 (WebDav.isPikPak(url) ? "PikPak 서버" : "PC 서버") + "가 파일 크기를 알려 주지 않았습니다.");
-          return Long.parseLong(cr.substring(slash + 1).trim());
+          long total = Long.parseLong(cr.substring(slash + 1).trim());
+          return new ProbeResult(total, resolved, keepAuth);
         }
         if (res.code() == 200) {
           long cl = res.body() != null ? res.body().contentLength() : -1;
-          if (cl > 0) return cl;
+          if (cl > 0) return new ProbeResult(cl, resolved, keepAuth);
         }
         throw WebDav.fail(res.code() == 200 ? 416 : res.code(), url);
       } catch (IOException e) {
@@ -466,7 +490,9 @@ final class RemoteBooks {
       if (out.isFile()) return out;
       if (isCancelled(cancel, progress)) throw new CancelledException();
       File part = new File(out.getPath() + ".part"), map = new File(out.getPath() + ".pieces");
-      long total = probe(url, auth, cancel, progress);
+      ProbeResult probed = probe(url, auth, cancel, progress);
+      long total = probed.total;
+      AtomicReference<ProbeResult> targetRef = new AtomicReference<>(probed);
       int pieces = (int) ((total + pieceSize - 1) / pieceSize);
       BitSet done =
           part.isFile() && part.length() == total
@@ -501,11 +527,28 @@ final class RemoteBooks {
                       return;
                     }
                     if (error.get() != null) return;
+                    ProbeResult curTarget = targetRef.get();
+                    String fetchUrl = curTarget != null ? curTarget.directUrl : url;
+                    String fetchAuth =
+                        curTarget == null || curTarget.directNeedsAuth ? auth : "";
                     Call call =
                         CLIENT.newCall(
-                            request(url, auth).header("Range", "bytes=" + pos + "-" + end).build());
+                            request(fetchUrl, fetchAuth)
+                                .header("Range", "bytes=" + pos + "-" + end)
+                                .build());
                     cancel.track(call);
                     try (Response res = executeTracked(call, url)) {
+                      if ((res.code() == 401
+                              || res.code() == 403
+                              || res.code() == 404
+                              || res.code() == 410)
+                          && curTarget != null
+                          && !curTarget.directUrl.equals(url)) {
+                        // CDN 서명 링크가 만료됐으면 원래 WebDAV 주소로 1회 재발급받는다.
+                        targetRef.compareAndSet(curTarget, null);
+                        if (attempt + 1 >= ATTEMPTS) throw WebDav.fail(res.code(), url);
+                        continue;
+                      }
                       if (res.code() == 429) {
                         if (attempt + 1 >= ATTEMPTS) {
                           error.compareAndSet(null, WebDav.fail(429, url));
@@ -517,6 +560,11 @@ final class RemoteBooks {
                       }
                       if (res.code() != 206 && !(res.code() == 200 && pos == 0 && end == total - 1))
                         throw WebDav.fail(res.code() == 200 ? 416 : res.code(), url);
+                      if (curTarget == null) {
+                        String resolved = res.request().url().toString();
+                        targetRef.compareAndSet(
+                            null, new ProbeResult(total, resolved, sameHost(url, resolved)));
+                      }
                       ResponseBody body = res.body();
                       if (body == null)
                         throw new IOException((pikpak ? "PikPak 서버" : "PC 서버") + "가 빈 응답을 보냈습니다.");

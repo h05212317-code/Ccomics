@@ -310,7 +310,7 @@ final class Library extends SQLiteOpenHelper {
     if (WebDav.isUrl(b.url)) {
       // 보관함에 받아 둔 권은 PC·네트워크 없이 저장본으로 연다.
       if (RemoteBooks.has(ctx, b.url)) return new Archive(ctx, RemoteBooks.localAddress(ctx, b.url), null);
-      return new Archive(ctx, b.url, null, httpAuth(b.source));
+      return new Archive(ctx, b.url, null, httpAuth(b.source), b.size);
     }
     return new Archive(ctx, b.url, b.url.startsWith("smb://") ? session(b.source) : null);
   }
@@ -347,6 +347,166 @@ final class Library extends SQLiteOpenHelper {
 
   interface Notice {
     void changed();
+
+    default void progress(int done, int total) {}
+  }
+
+  /** WebDAV 하위 폴더들을 4개 스레드로 병렬 탐색해 초기 색인 목록 수집 지연을 줄인다. */
+  private void scanWebDavTree(String rootUrl, String auth, IndexBatch batch) throws Exception {
+    final int workers = 4;
+    final ArrayDeque<String> queue = new ArrayDeque<>();
+    final HashSet<String> visited = new HashSet<>();
+    final java.util.concurrent.atomic.AtomicReference<Exception> failure =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    final Object lock = new Object();
+    final int[] active = {0};
+    queue.add(rootUrl);
+    java.util.concurrent.ExecutorService pool =
+        java.util.concurrent.Executors.newFixedThreadPool(workers);
+    try {
+      for (int i = 0; i < workers; i++) {
+        pool.execute(
+            () -> {
+              while (true) {
+                String parent;
+                synchronized (lock) {
+                  while (queue.isEmpty() && active[0] > 0 && failure.get() == null) {
+                    try {
+                      lock.wait();
+                    } catch (InterruptedException e) {
+                      return;
+                    }
+                  }
+                  if (failure.get() != null || queue.isEmpty()) return;
+                  parent = queue.remove();
+                  if (!visited.add(parent)) continue;
+                  active[0]++;
+                }
+                try {
+                  List<WebDav.Entry> entries = WebDav.list(parent, auth);
+                  synchronized (lock) {
+                    for (WebDav.Entry e : entries) {
+                      if (e.dir) queue.add(e.url.endsWith("/") ? e.url : e.url + "/");
+                      else batch.add(e.url, e.name, parent, e.size, e.modified);
+                    }
+                  }
+                } catch (Exception e) {
+                  failure.compareAndSet(null, e);
+                } finally {
+                  synchronized (lock) {
+                    active[0]--;
+                    lock.notifyAll();
+                  }
+                }
+              }
+            });
+      }
+      pool.shutdown();
+      pool.awaitTermination(10, java.util.concurrent.TimeUnit.MINUTES);
+    } finally {
+      pool.shutdownNow();
+    }
+    if (failure.get() != null) throw failure.get();
+  }
+
+  /** WebDAV 원격 책 표지·쪽수 색인을 4개 스레드로 병렬 처리한다(표지 1장만 읽어 낭비 제거). */
+  private void indexPendingWebDav(long token, ArrayList<Long> pending, Notice notice) {
+    final int workers = Math.min(4, Math.max(1, pending.size()));
+    final ArrayDeque<Long> queue = new ArrayDeque<>(pending);
+    final Object queueLock = new Object();
+    final Object dbLock = new Object();
+    final int[] active = {0};
+    final int[] done = {0};
+    final int[] total = {pending.size()};
+    java.util.concurrent.ExecutorService pool =
+        java.util.concurrent.Executors.newFixedThreadPool(workers);
+    try {
+      for (int w = 0; w < workers; w++) {
+        pool.execute(
+            () -> {
+              while (true) {
+                long id;
+                synchronized (queueLock) {
+                  while (queue.isEmpty() && active[0] > 0) {
+                    try {
+                      queueLock.wait();
+                    } catch (InterruptedException e) {
+                      return;
+                    }
+                  }
+                  if (queue.isEmpty()) return;
+                  id = queue.remove();
+                  active[0]++;
+                }
+                try {
+                  Book b;
+                  synchronized (dbLock) {
+                    b = get(id);
+                  }
+                  if (b == null) continue;
+                  try (Archive a = open(b)) {
+                    int index = 0;
+                    for (int i = 0; i < a.pages.size(); i++)
+                      if (a.name(i).equals(b.cover)) {
+                        index = i;
+                        break;
+                      }
+                    Bitmap image = a.decodeCover(index, 320, 480);
+                    writeCover(id, image);
+                    image.recycle();
+                    int pageCount = a.pages.size();
+                    String fp = a.fingerprint();
+                    synchronized (dbLock) {
+                      exec(
+                          "UPDATE books SET pages=?,page=min(page,?),fingerprint=?,error='',bundle=0 WHERE id=?",
+                          pageCount,
+                          pageCount - 1,
+                          fp,
+                          id);
+                      applyComicInfo(b, a);
+                    }
+                  } catch (Archive.Bundle bundle) {
+                    ArrayList<Long> added = new ArrayList<>();
+                    synchronized (dbLock) {
+                      exec("UPDATE books SET bundle=1,pages=0,error='' WHERE id=?", id);
+                      expandBundle(b, bundle.volumes, token, added);
+                      pending.addAll(added);
+                    }
+                    if (!added.isEmpty()) {
+                      synchronized (queueLock) {
+                        queue.addAll(added);
+                        total[0] += added.size();
+                        queueLock.notifyAll();
+                      }
+                    }
+                  } catch (Exception e) {
+                    synchronized (dbLock) {
+                      exec("UPDATE books SET error=? WHERE id=?", reason(e), id);
+                    }
+                  }
+                  int finished, curTotal;
+                  synchronized (queueLock) {
+                    finished = ++done[0];
+                    curTotal = total[0];
+                  }
+                  notice.progress(finished, curTotal);
+                  if (finished % 4 == 0) notice.changed();
+                } finally {
+                  synchronized (queueLock) {
+                    active[0]--;
+                    queueLock.notifyAll();
+                  }
+                }
+              }
+            });
+      }
+      pool.shutdown();
+      pool.awaitTermination(30, java.util.concurrent.TimeUnit.MINUTES);
+    } catch (InterruptedException ignored) {
+      Thread.currentThread().interrupt();
+    } finally {
+      pool.shutdownNow();
+    }
   }
 
   void scan(long source, Notice notice) throws Exception {
@@ -358,19 +518,9 @@ final class Library extends SQLiteOpenHelper {
       for (String id : strings("SELECT id FROM books WHERE source=?", "" + source))
         coverFile(Long.parseLong(id)).delete();
     IndexBatch batch = new IndexBatch(source, token, pending);
-    if (WebDav.isUrl(url)) {
-      String auth = httpAuth(source);
-      ArrayDeque<String> dirs = new ArrayDeque<>();
-      dirs.add(url);
-      HashSet<String> visited = new HashSet<>();
-      while (!dirs.isEmpty()) {
-        String parent = dirs.remove();
-        if (!visited.add(parent)) continue;
-        for (WebDav.Entry e : WebDav.list(parent, auth)) {
-          if (e.dir) dirs.add(e.url.endsWith("/") ? e.url : e.url + "/");
-          else batch.add(e.url, e.name, parent, e.size, e.modified);
-        }
-      }
+    boolean isWebDav = WebDav.isUrl(url);
+    if (isWebDav) {
+      scanWebDavTree(url, httpAuth(source), batch);
     } else if (url.startsWith("smb://")) {
       CIFSContext smb = session(source);
       ArrayDeque<String> dirs = new ArrayDeque<>();
@@ -434,34 +584,39 @@ final class Library extends SQLiteOpenHelper {
     SharedPreferences rules = ctx.getSharedPreferences("options", 0);
     String rulesKey = "rules-" + source;
     if (rules.getInt(rulesKey, 0) < RULES) recheckBundles(source, token, pending);
-    int n = 0;
-    for (int k = 0; k < pending.size(); k++) {
-      long id = pending.get(k);
-      Book b = get(id);
-      try (Archive a = open(b)) {
-        int index = 0;
-        for (int i = 0; i < a.pages.size(); i++)
-          if (a.name(i).equals(b.cover)) {
-            index = i;
-            break;
-          }
-        Bitmap image = a.decode(index, 320, 480);
-        writeCover(id, image);
-        image.recycle();
-        exec(
-            "UPDATE books SET pages=?,page=min(page,?),fingerprint=?,error='',bundle=0 WHERE id=?",
-            a.pages.size(),
-            a.pages.size() - 1,
-            a.fingerprint(),
-            id);
-        applyComicInfo(b, a);
-      } catch (Archive.Bundle bundle) {
-        exec("UPDATE books SET bundle=1,pages=0,error='' WHERE id=?", id);
-        expandBundle(b, bundle.volumes, token, pending);
-      } catch (Exception e) {
-        exec("UPDATE books SET error=? WHERE id=?", reason(e), id);
+    if (isWebDav && pending.size() > 1) {
+      indexPendingWebDav(token, pending, notice);
+    } else {
+      int n = 0;
+      for (int k = 0; k < pending.size(); k++) {
+        long id = pending.get(k);
+        Book b = get(id);
+        try (Archive a = open(b)) {
+          int index = 0;
+          for (int i = 0; i < a.pages.size(); i++)
+            if (a.name(i).equals(b.cover)) {
+              index = i;
+              break;
+            }
+          Bitmap image = a.decodeCover(index, 320, 480);
+          writeCover(id, image);
+          image.recycle();
+          exec(
+              "UPDATE books SET pages=?,page=min(page,?),fingerprint=?,error='',bundle=0 WHERE id=?",
+              a.pages.size(),
+              a.pages.size() - 1,
+              a.fingerprint(),
+              id);
+          applyComicInfo(b, a);
+        } catch (Archive.Bundle bundle) {
+          exec("UPDATE books SET bundle=1,pages=0,error='' WHERE id=?", id);
+          expandBundle(b, bundle.volumes, token, pending);
+        } catch (Exception e) {
+          exec("UPDATE books SET error=? WHERE id=?", reason(e), id);
+        }
+        notice.progress(k + 1, pending.size());
+        if (++n % 8 == 0) notice.changed();
       }
-      if (++n % 8 == 0) notice.changed();
     }
     reconcileMoved(source, pending);
     rules.edit().putInt(rulesKey, RULES).apply();
