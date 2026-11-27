@@ -29,12 +29,13 @@ import java.util.function.*;
 public final class Main extends Activity {
   static final int THUMB_MIN_DP = 76, THUMB_MAX_DP = 220, THUMB_DEFAULT_DP = 133;
   static final int SORT_TITLE = 0, SORT_RECENT = 1, SORT_ADDED = 2, SORT_CUSTOM = 3;
+  static final int REMOTE_NONE = 0, REMOTE_CLOUD = 1, REMOTE_CACHED = 2;
   static final String[] SORT_NAMES = {"제목순", "최근 읽은순", "최근 추가순", "사용자 정의"};
   AppUpdates updates;
   Library db;
   SharedPreferences prefs;
   final ExecutorService worker = Executors.newSingleThreadExecutor(),
-      readerIO = Executors.newSingleThreadExecutor(),
+      readerIO = Executors.newCachedThreadPool(),
       thumbs = Executors.newFixedThreadPool(4);
   final LruCache<String, Bitmap> coverCache =
       new LruCache<String, Bitmap>(
@@ -65,7 +66,9 @@ public final class Main extends Activity {
   ShelfDragController dragController;
   TouchZoneOverlay touchZoneOverlay;
   String selected = "", shelf = "", query = "", scanMessage = "";
-  int filter, requestId, gridIndex, gridOffset, volumeIndex, volumeOffset;
+  int filter, gridIndex, gridOffset, volumeIndex, volumeOffset;
+  volatile int requestId;
+  volatile RemoteBooks.Cancel activeDownload;
   boolean busy, loadingBook, dark, readerImmersive, arrangeMode, resumeDismissed, floatingResumeVisible;
   int bg, ink, muted, surface, accent;
 
@@ -83,9 +86,10 @@ public final class Main extends Activity {
     final long maxOpened;
     final long maxId;
     final boolean hasFav, hasReading, hasDone;
+    final int remoteState;
     final Set<String> shelves;
 
-    SeriesEntry(String grp, List<Library.Book> books, boolean hideTags) {
+    SeriesEntry(String grp, List<Library.Book> books, boolean hideTags, Set<String> downloaded) {
       this.grp = grp;
       this.books = books;
       Library.Book first = books.get(0);
@@ -93,6 +97,7 @@ public final class Main extends Activity {
       int maxRating = 0, maxCustom = 0;
       long opened = 0, added = 0;
       boolean fav = false, reading = false, done = false;
+      boolean allExt = !books.isEmpty(), allCached = !books.isEmpty();
       Set<String> sh = null;
       StringBuilder blob = new StringBuilder();
       for (int i = 0; i < books.size(); i++) {
@@ -105,6 +110,12 @@ public final class Main extends Activity {
         if (b.fav) fav = true;
         if (b.opened > 0 && !b.done) reading = true;
         if (b.done) done = true;
+        if (!Library.external(b)) {
+          allExt = false;
+          allCached = false;
+        } else if (!WebDav.isUrl(b.url) || !RemoteBooks.has(downloaded, b.url)) {
+          allCached = false;
+        }
         if (!b.shelf.isEmpty()) {
           if (sh == null) sh = new HashSet<>(2);
           sh.add(b.shelf);
@@ -127,6 +138,7 @@ public final class Main extends Activity {
       this.hasFav = fav;
       this.hasReading = reading;
       this.hasDone = done;
+      this.remoteState = !allExt ? REMOTE_NONE : (allCached ? REMOTE_CACHED : REMOTE_CLOUD);
       this.shelves = sh == null ? Collections.emptySet() : sh;
       String base = books.size() + "권";
       String favSuffix = fav ? "  ·  즐겨찾기" : "";
@@ -435,6 +447,7 @@ public final class Main extends Activity {
                         "지우기",
                         (d2, w2) -> {
                           RemoteBooks.clear(this);
+                          refreshRemoteEntries();
                           toast("PC 원격 보관함을 비웠습니다.");
                         })
                     .setNegativeButton("취소", null)
@@ -458,6 +471,10 @@ public final class Main extends Activity {
 
   int countAccentColor() {
     return dark ? 0xffff5286 : 0xffff2e6e;
+  }
+
+  int remoteCachedColor() {
+    return dark ? 0xff4ea3ff : 0xff2580eb;
   }
 
   String filterLabel() {
@@ -838,20 +855,39 @@ public final class Main extends Activity {
       }
       if (same) return;
     }
+    Set<String> downloaded = RemoteBooks.downloadedNames(this);
     Map<String, SeriesEntry> built = new LinkedHashMap<>(groups.size() * 2);
     for (Map.Entry<String, List<Library.Book>> e : groups.entrySet()) {
       if (!e.getValue().isEmpty()) {
-        built.put(e.getKey(), new SeriesEntry(e.getKey(), e.getValue(), hideTags));
+        built.put(e.getKey(), new SeriesEntry(e.getKey(), e.getValue(), hideTags, downloaded));
       }
     }
     entries = built;
     entriesHideTags = hideTags;
   }
 
+  void refreshRemoteEntries() {
+    Set<String> downloaded = RemoteBooks.downloadedNames(this);
+    boolean hideTags = prefs.getBoolean("hideVolumeTags", true);
+    Map<String, SeriesEntry> built = new LinkedHashMap<>(groups.size() * 2);
+    for (Map.Entry<String, List<Library.Book>> e : groups.entrySet()) {
+      if (!e.getValue().isEmpty()) {
+        built.put(e.getKey(), new SeriesEntry(e.getKey(), e.getValue(), hideTags, downloaded));
+      }
+    }
+    entries = built;
+    entriesHideTags = hideTags;
+    renderNow(true);
+  }
+
   void rebuildEntry(String grp) {
     List<Library.Book> group = groups.get(grp);
     if (group == null || group.isEmpty()) entries.remove(grp);
-    else entries.put(grp, new SeriesEntry(grp, group, prefs.getBoolean("hideVolumeTags", true)));
+    else
+      entries.put(
+          grp,
+          new SeriesEntry(
+              grp, group, prefs.getBoolean("hideVolumeTags", true), RemoteBooks.downloadedNames(this)));
   }
 
   void updateScanBanner() {
@@ -873,6 +909,7 @@ public final class Main extends Activity {
         () -> {
           List<Library.Book> all = db.books();
           if (!remoteOn()) all.removeIf(x -> WebDav.isUrl(x.url));
+          Set<String> downloaded = RemoteBooks.downloadedNames(this);
           Map<String, List<Library.Book>> sorted = new LinkedHashMap<>();
           for (int i = 0; i < all.size(); i++) {
             Library.Book b = all.get(i);
@@ -882,7 +919,7 @@ public final class Main extends Activity {
           for (Map.Entry<String, List<Library.Book>> e : sorted.entrySet()) {
             List<Library.Book> group = e.getValue();
             Order.sortBooks(group);
-            built.put(e.getKey(), new SeriesEntry(e.getKey(), group, hideTags));
+            built.put(e.getKey(), new SeriesEntry(e.getKey(), group, hideTags, downloaded));
           }
           runOnUiThread(
               () -> {
@@ -932,6 +969,7 @@ public final class Main extends Activity {
       bar.addView(backBtn, dp(44), dp(44));
       backBtn.setOnClickListener(
           w -> {
+            if (loadingBook) cancelLoadingBook();
             selected = "";
             renderNow(false);
           });
@@ -1187,7 +1225,7 @@ public final class Main extends Activity {
       for (int i = 0; i < list.size(); i++) {
         SeriesEntry e = list.get(i);
         if (buckets[e.rating] == null) buckets[e.rating] = new ArrayList<>();
-        buckets[e.rating].add(new CoverItem(e.rep, e.displayTitle, e.subtitleNoStar));
+        buckets[e.rating].add(new CoverItem(e.rep, e.displayTitle, e.subtitleNoStar, e.remoteState));
       }
       List<StarSection> sections = new ArrayList<>(6);
       for (int r = 5; r >= 0; r--) {
@@ -1213,7 +1251,7 @@ public final class Main extends Activity {
       List<CoverItem> covers = new ArrayList<>(list.size());
       for (int i = 0; i < list.size(); i++) {
         SeriesEntry e = list.get(i);
-        covers.add(new CoverItem(e.rep, e.displayTitle, e.subtitleWithStar));
+        covers.add(new CoverItem(e.rep, e.displayTitle, e.subtitleWithStar, e.remoteState));
       }
       if (sort == SORT_CUSTOM) {
         List<StarSection> flat = new ArrayList<>(1);
@@ -1373,17 +1411,17 @@ public final class Main extends Activity {
     final Library.Book book;
     final String title;
     final CharSequence subtitle;
-    final boolean external;
+    final int remoteState;
 
     CoverItem(Library.Book book, String title, CharSequence subtitle) {
-      this(book, title, subtitle, false);
+      this(book, title, subtitle, REMOTE_NONE);
     }
 
-    CoverItem(Library.Book book, String title, CharSequence subtitle, boolean external) {
+    CoverItem(Library.Book book, String title, CharSequence subtitle, int remoteState) {
       this.book = book;
       this.title = title;
       this.subtitle = subtitle;
-      this.external = external;
+      this.remoteState = remoteState;
     }
   }
 
@@ -1735,7 +1773,7 @@ public final class Main extends Activity {
           loadCover(h.img, item.book);
           h.name.setText(item.title);
           h.sub.setText(item.subtitle);
-          remoteMark(h.sub, item.external);
+          remoteMark(h.sub, item.remoteState);
           boolean isDragged = arrangeMode && item.book.id == draggedBookId;
           h.root.setAlpha(isDragged ? 0.16f : 1f);
           h.syncWiggle(arrangeMode && !isDragged, item.book.id + c);
@@ -2318,7 +2356,7 @@ public final class Main extends Activity {
             loadCover(h.img, item.book);
             h.name.setText(item.title);
             h.sub.setText(item.subtitle);
-            remoteMark(h.sub, item.external);
+            remoteMark(h.sub, item.remoteState);
             return h.root;
           }
         });
@@ -2371,14 +2409,16 @@ public final class Main extends Activity {
         });
   }
 
-  /** 기기 밖(PC 원격·Windows 공유)에서 추가된 권이면 아래 줄 오른쪽에 구름 아이콘을 붙인다. */
-  void remoteMark(TextView sub, boolean external) {
-    if (!external) {
+  /** 기기 밖(PC 원격·Windows 공유) 책이면 아래 줄 오른쪽에 구름 아이콘을 붙인다. 보관함에 받아 둔 책은 파랗게 채운다. */
+  void remoteMark(TextView sub, int remoteState) {
+    if (remoteState == REMOTE_NONE) {
       sub.setCompoundDrawablesRelative(null, null, null, null);
       return;
     }
-    android.graphics.drawable.Drawable d = getDrawable(R.drawable.icon_remote).mutate();
-    d.setTint(muted);
+    boolean cached = remoteState == REMOTE_CACHED;
+    android.graphics.drawable.Drawable d =
+        getDrawable(cached ? R.drawable.icon_remote_filled : R.drawable.icon_remote).mutate();
+    d.setTint(cached ? remoteCachedColor() : muted);
     int size = dp(13);
     d.setBounds(0, 0, size, size);
     sub.setCompoundDrawablePadding(dp(4));
@@ -2393,6 +2433,7 @@ public final class Main extends Activity {
     List<Library.Book> volumes = groups.get(selected);
     String name = seriesDisplayName(selected, volumes);
     boolean hideTags = prefs.getBoolean("hideVolumeTags", true);
+    Set<String> downloaded = RemoteBooks.downloadedNames(this);
     LinearLayout title = row();
     pad(title, 16, 10);
     pane.addView(title);
@@ -2430,7 +2471,13 @@ public final class Main extends Activity {
         sub.append("  ");
       }
       sub.append(status);
-      covers.add(new CoverItem(b, display, sub, Library.external(b)));
+      int remoteState =
+          !Library.external(b)
+              ? REMOTE_NONE
+              : (WebDav.isUrl(b.url) && RemoteBooks.has(downloaded, b.url)
+                  ? REMOTE_CACHED
+                  : REMOTE_CLOUD);
+      covers.add(new CoverItem(b, display, sub, remoteState));
     }
     coverGrid(pane, covers, true);
   }
@@ -3044,11 +3091,32 @@ public final class Main extends Activity {
     dlg.show();
   }
 
+  void abortActiveDownload() {
+    RemoteBooks.Cancel prev = activeDownload;
+    activeDownload = null;
+    if (prev != null) {
+      prev.markCancelled();
+      readerIO.execute(prev::cancel);
+    }
+  }
+
+  void cancelLoadingBook() {
+    requestId++;
+    loadingBook = false;
+    abortActiveDownload();
+    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+    updateScanBanner();
+  }
+
   void open(Library.Book b) {
     remember();
     resumeDismissed = false;
+    abortActiveDownload();
     int token = ++requestId;
     loadingBook = true;
+    RemoteBooks.Cancel cancel = WebDav.isUrl(b.url) ? new RemoteBooks.Cancel() : null;
+    activeDownload = cancel;
     scanMessage = "책을 여는 중…";
     if (reader == null) updateScanBanner();
     readerIO.execute(
@@ -3058,7 +3126,10 @@ public final class Main extends Activity {
             // 받는 동안 화면이 꺼져 연결이 끊기지 않게 한다.
             if (fetching)
               runOnUiThread(
-                  () -> getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
+                  () -> {
+                    if (token == requestId && !isDestroyed())
+                      getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  });
             if (fetching) {
               // PC 원격 책은 처음 열 때 권 전체를 받아 보관함에 저장한 뒤 연다(이후 오프라인으로도 열림).
               RemoteBooks.download(
@@ -3084,8 +3155,10 @@ public final class Main extends Activity {
                     public boolean cancelled() {
                       return token != requestId || isDestroyed();
                     }
-                  });
+                  },
+                  cancel);
             }
+            if (token != requestId || isDestroyed()) return;
             Archive a = db.open(b);
             if (a.comicInfo != null && b.comicSeries.isEmpty() && b.comicNumber.isEmpty()) {
               db.applyComicInfo(b, a);
@@ -3102,7 +3175,7 @@ public final class Main extends Activity {
                     return;
                   }
                   loadingBook = false;
-                  scanMessage = "";
+                  scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
                   if (reader != null) reader.close();
                   grid = null;
                   shelfList = null;
@@ -3127,8 +3200,9 @@ public final class Main extends Activity {
                 () -> {
                   if (isDestroyed() || token != requestId) return;
                   loadingBook = false;
-                  scanMessage = "";
+                  scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
                   updateScanBanner();
+                  if (e instanceof InterruptedIOException) return;
                   if (e instanceof RemoteBooks.Incomplete) {
                     RemoteBooks.Incomplete x = (RemoteBooks.Incomplete) e;
                     alert(
@@ -3139,8 +3213,12 @@ public final class Main extends Activity {
                   } else alert("책을 열 수 없습니다", Library.reason(e));
                 });
           } finally {
+            if (cancel != null && activeDownload == cancel) activeDownload = null;
             runOnUiThread(
-                () -> getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
+                () -> {
+                  if (token == requestId && !isDestroyed())
+                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                });
           }
         });
   }
@@ -3529,7 +3607,7 @@ public final class Main extends Activity {
 
   void leaveReader() {
     closeTouchZoneEditor();
-    requestId++;
+    cancelLoadingBook();
     String closedGrp = reader.book.grp;
     reader.close();
     reader = null;
@@ -3557,10 +3635,7 @@ public final class Main extends Activity {
       return;
     }
     if (loadingBook) {
-      requestId++;
-      loadingBook = false;
-      scanMessage = "";
-      updateScanBanner();
+      cancelLoadingBook();
       return;
     }
     if (arrangeMode) {
@@ -3584,6 +3659,14 @@ public final class Main extends Activity {
   protected void onDestroy() {
     if (dragController != null) dragController.cancel();
     if (reader != null) reader.close();
+    RemoteBooks.Cancel c = activeDownload;
+    activeDownload = null;
+    if (c != null) {
+      c.markCancelled();
+      Thread t = new Thread(c::cancel, "ccomics-cancel-destroy");
+      t.setDaemon(true);
+      t.start();
+    }
     handler.removeCallbacks(refresh);
     if (pendingThumbResize != null) handler.removeCallbacks(pendingThumbResize);
     worker.shutdown();
