@@ -625,7 +625,7 @@ public final class Main extends Activity {
       } else if (primary == null) {
         status = "서재 기록 없음";
       } else if (missing) {
-        status = "PC에서 사라짐";
+        status = WebDav.isPikPak(primary.url) ? "PikPak에서 사라짐" : "PC에서 사라짐";
       } else if (allDone) {
         status = "완독";
       } else if (isBundle) {
@@ -725,7 +725,7 @@ public final class Main extends Activity {
     rootBox.addView(summaryView);
 
     TextView captionView =
-        label("PC가 꺼져 있어도 바로 열립니다. 지워도 PC 원본은 유지됩니다.", 12, muted, false);
+        label("PC가 꺼져 있거나 PikPak이 일반 상태여도 바로 열립니다. 지워도 원본은 유지됩니다.", 12, muted, false);
     captionView.setPadding(0, dp(3), 0, dp(10));
     rootBox.addView(captionView);
 
@@ -1198,9 +1198,31 @@ public final class Main extends Activity {
     dlg.show();
   }
 
-  /** PC 원격 폴더 사용 여부. 끄면 원격 책을 책장에서 숨기고 새로고침 때 연결하지 않는다. */
+  static final int SOURCE_ON = 0, SOURCE_CACHED_ONLY = 1, SOURCE_HIDDEN = 2;
+
+  /** 기존 전역 PC 원격 폴더 스위치(개별 설정이 없는 예전 원격 폴더의 기본값으로 사용). */
   boolean remoteOn() {
     return prefs.getBoolean("remoteOn", true);
+  }
+
+  int sourceMode(long sourceId, String url) {
+    if (!WebDav.isUrl(url)) return SOURCE_ON;
+    String key = "sourceMode-" + sourceId;
+    if (prefs.contains(key)) {
+      int v = prefs.getInt(key, SOURCE_ON);
+      return v >= SOURCE_ON && v <= SOURCE_HIDDEN ? v : SOURCE_ON;
+    }
+    return remoteOn() ? SOURCE_ON : SOURCE_HIDDEN;
+  }
+
+  void setSourceMode(long sourceId, int mode) {
+    prefs.edit().putInt("sourceMode-" + sourceId, mode).apply();
+  }
+
+  static String sourceModeLabel(int mode) {
+    if (mode == SOURCE_CACHED_ONLY) return "보관본만";
+    if (mode == SOURCE_HIDDEN) return "숨김";
+    return "켜짐";
   }
 
   boolean showShelfCount() {
@@ -1650,8 +1672,18 @@ public final class Main extends Activity {
     snapshots.execute(
         () -> {
           List<Library.Book> all = db.books();
-          if (!remoteOn()) all.removeIf(x -> WebDav.isUrl(x.url));
           Set<String> downloaded = RemoteBooks.downloadedNames(this);
+          List<Library.Source> remoteSrcs = db.remoteSources();
+          Map<Long, Integer> sourceModes = new HashMap<>(remoteSrcs.size() * 2);
+          for (Library.Source s : remoteSrcs) sourceModes.put(s.id, sourceMode(s.id, s.url));
+          int fallbackMode = remoteOn() ? SOURCE_ON : SOURCE_HIDDEN;
+          all.removeIf(
+              x -> {
+                if (!WebDav.isUrl(x.url)) return false;
+                int mode = sourceModes.getOrDefault(x.source, fallbackMode);
+                if (mode == SOURCE_HIDDEN) return true;
+                return mode == SOURCE_CACHED_ONLY && !RemoteBooks.has(downloaded, x.url);
+              });
           Map<String, List<Library.Book>> sorted = new LinkedHashMap<>();
           for (int i = 0; i < all.size(); i++) {
             Library.Book b = all.get(i);
@@ -3244,7 +3276,11 @@ public final class Main extends Activity {
     choices(
         "책 추가",
         new String[] {
-          "기기 폴더 연결", "ZIP · CBZ 파일 선택", "Windows 공유 폴더 연결", "PC 원격 폴더 연결 (외부에서도)"
+          "기기 폴더 연결",
+          "ZIP · CBZ 파일 선택",
+          "Windows 공유 폴더 연결",
+          "PC 원격 폴더 연결 (외부에서도)",
+          "PikPak 폴더 연결 (PC 꺼져도 사용)"
         },
         i -> {
           if (i == 2) {
@@ -3253,6 +3289,10 @@ public final class Main extends Activity {
           }
           if (i == 3) {
             remote();
+            return;
+          }
+          if (i == 4) {
+            pikpak();
             return;
           }
           Intent in =
@@ -3374,9 +3414,393 @@ public final class Main extends Activity {
                       WebDav.list(fu, WebDav.auth(fuser, fpass));
                       long id = db.register(fu, fuser, fpass);
                       db.reconnect(id);
-                      runOnUiThread(() -> scan(Collections.singletonList(id)));
+                      runOnUiThread(
+                          () -> {
+                            setSourceMode(id, SOURCE_ON);
+                            scan(Collections.singletonList(id));
+                          });
                     } catch (Exception ex) {
                       runOnUiThread(() -> alert("연결 실패", Library.reason(ex)));
+                    }
+                  })
+                  .start();
+            })
+        .setNegativeButton("취소", null)
+        .show();
+  }
+
+  /** PikPak 공식 WebDAV(예: https://dav.pikpak.ai/)에 연결한 뒤 원하는 특정 폴더를 선택해 등록한다. */
+  void pikpak() {
+    String defaultEndpoint = WebDav.PIKPAK_DEFAULT_URL;
+    String defaultUser = "";
+    for (Library.Source s : db.remoteSources()) {
+      if (WebDav.isPikPak(s.url)) {
+        okhttp3.HttpUrl u = okhttp3.HttpUrl.parse(s.url);
+        if (u != null) defaultEndpoint = "https://" + u.host() + "/";
+        if (!s.user.isEmpty()) defaultUser = s.user;
+        break;
+      }
+    }
+    LinearLayout box = col();
+    pad(box, 22, 8);
+    TextView guide =
+        label(
+            "PikPak 설정 → WebDAV에서 발급된 전용 사용자 이름과 비밀번호를 입력하세요.\n연결 후 PikPak 안의 특정 폴더를 고를 수 있습니다.",
+            12,
+            muted,
+            false);
+    guide.setPadding(0, 0, 0, dp(10));
+    box.addView(guide);
+    String[] hints = {"WebDAV 주소 (예: dav.pikpak.ai)", "WebDAV 사용자 이름", "WebDAV 비밀번호"};
+    EditText[] e = new EditText[3];
+    for (int i = 0; i < 3; i++) {
+      e[i] = new EditText(this);
+      e[i].setSingleLine();
+      e[i].setHint(hints[i]);
+      box.addView(e[i]);
+    }
+    e[0].setText(defaultEndpoint);
+    if (!defaultUser.isEmpty()) e[1].setText(defaultUser);
+    e[2].setInputType(129);
+    dialog()
+        .setTitle("PikPak 폴더 연결")
+        .setView(box)
+        .setPositiveButton(
+            "폴더 선택",
+            (d, w) -> {
+              String rawAddress = e[0].getText().toString().trim();
+              String user = e[1].getText().toString().trim();
+              String pass = e[2].getText().toString();
+              okhttp3.HttpUrl u = WebDav.parseEndpoint(rawAddress);
+              if (u == null) {
+                alert("주소 확인", "dav.pikpak.ai 또는 https://로 시작하는 WebDAV 주소를 입력하세요.");
+                return;
+              }
+              if (!u.username().isEmpty()) {
+                user = u.username();
+                pass = u.password();
+                u = u.newBuilder().username("").password("").build();
+              }
+              if (user.isEmpty() || pass.isEmpty()) {
+                alert("계정 확인", "PikPak WebDAV 설정에서 발급된 사용자 이름과 비밀번호를 입력하세요.");
+                return;
+              }
+              String rootUrl = u.toString();
+              if (!rootUrl.endsWith("/")) rootUrl += "/";
+              String fRoot = rootUrl, fUser = user, fPass = pass;
+              toast("PikPak에 연결하고 있습니다…");
+              new Thread(
+                  () -> {
+                    try {
+                      List<WebDav.Entry> entries = WebDav.list(fRoot, WebDav.auth(fUser, fPass));
+                      runOnUiThread(() -> pickWebDavFolder(fRoot, fUser, fPass, fRoot, entries));
+                    } catch (Exception ex) {
+                      runOnUiThread(() -> alert("PikPak 연결 실패", Library.reason(ex)));
+                    }
+                  })
+                  .start();
+            })
+        .setNegativeButton("취소", null)
+        .show();
+  }
+
+  /** 연결된 WebDAV(PikPak) 서버의 폴더를 탐색해 사용자가 원하는 특정 폴더를 고른다. */
+  void pickWebDavFolder(
+      String rootUrl,
+      String user,
+      String pass,
+      String initialUrl,
+      List<WebDav.Entry> initialEntries) {
+    if (isDestroyed()) return;
+    AlertDialog.Builder builder = dialog();
+    LinearLayout box = col();
+    pad(box, 18, 8);
+    TextView pathView = label("", 14, ink, true);
+    box.addView(pathView);
+    TextView infoView = label("", 12, muted, false);
+    infoView.setPadding(0, dp(3), 0, dp(8));
+    box.addView(infoView);
+    View divider = new View(this);
+    divider.setBackgroundColor(surface);
+    box.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
+    ListView list = new ListView(builder.getContext());
+    list.setDivider(new ColorDrawable(surface));
+    list.setDividerHeight(dp(1));
+    box.addView(list, new LinearLayout.LayoutParams(-1, dp(320)));
+
+    final String auth = WebDav.auth(user, pass);
+    final ArrayDeque<String> history = new ArrayDeque<>();
+    final String[] currentUrl = {initialUrl};
+    final List<WebDav.Entry> subdirs = new ArrayList<>();
+    final boolean[] loading = {false};
+
+    Runnable[] renderRef = new Runnable[1];
+    java.util.function.BiConsumer<String, List<WebDav.Entry>> apply =
+        (dirUrl, items) -> {
+          currentUrl[0] = dirUrl;
+          subdirs.clear();
+          int comicFiles = 0;
+          for (WebDav.Entry item : items) {
+            if (item.dir) subdirs.add(item);
+            else if (item.name != null && Archive.volumeFile(item.name)) comicFiles++;
+          }
+          subdirs.sort((a, b) -> Order.natural(a.name, b.name));
+          okhttp3.HttpUrl parsed = okhttp3.HttpUrl.parse(dirUrl);
+          String relPath = "/";
+          if (parsed != null) {
+            List<String> segs = new ArrayList<>();
+            for (String s : parsed.pathSegments()) if (!s.isEmpty()) segs.add(s);
+            if (!segs.isEmpty()) relPath = "/" + String.join("/", segs);
+          }
+          pathView.setText("현재 위치: " + relPath);
+          infoView.setText("이 폴더의 만화 파일 " + comicFiles + "개  ·  하위 폴더 " + subdirs.size() + "개");
+          renderRef[0].run();
+        };
+
+    ArrayAdapter<String> adapter =
+        new ArrayAdapter<String>(builder.getContext(), android.R.layout.simple_list_item_1) {
+          @Override
+          public View getView(int pos, View convert, ViewGroup parent) {
+            TextView tv = (TextView) super.getView(pos, convert, parent);
+            String text = getItem(pos);
+            boolean emptyHint = text != null && text.startsWith("하위 폴더가 없습니다");
+            tv.setTextColor(emptyHint ? muted : ink);
+            tv.setTextSize(emptyHint ? 13 : 15);
+            tv.setPadding(dp(8), dp(10), dp(8), dp(10));
+            return tv;
+          }
+        };
+    list.setAdapter(adapter);
+
+    renderRef[0] =
+        () -> {
+          adapter.clear();
+          if (!history.isEmpty()) adapter.add("↑ 상위 폴더로");
+          for (WebDav.Entry d : subdirs) adapter.add("📁  " + d.name);
+          if (subdirs.isEmpty()) adapter.add("하위 폴더가 없습니다. 아래 [이 폴더 연결]을 누르세요.");
+          adapter.notifyDataSetChanged();
+        };
+
+    list.setOnItemClickListener(
+        (parent, view, pos, id) -> {
+          if (loading[0]) return;
+          boolean hasParent = !history.isEmpty();
+          if (hasParent && pos == 0) {
+            String prev = history.pop();
+            loading[0] = true;
+            infoView.setText("폴더 목록을 불러오는 중…");
+            new Thread(
+                () -> {
+                  try {
+                    List<WebDav.Entry> entries = WebDav.list(prev, auth);
+                    runOnUiThread(
+                        () -> {
+                          loading[0] = false;
+                          apply.accept(prev, entries);
+                        });
+                  } catch (Exception ex) {
+                    runOnUiThread(
+                        () -> {
+                          loading[0] = false;
+                          history.push(prev);
+                          alert("폴더 읽기 실패", Library.reason(ex));
+                        });
+                  }
+                })
+                .start();
+            return;
+          }
+          int idx = hasParent ? pos - 1 : pos;
+          if (idx < 0 || idx >= subdirs.size()) return;
+          WebDav.Entry chosen = subdirs.get(idx);
+          String nextUrl = chosen.url.endsWith("/") ? chosen.url : chosen.url + "/";
+          String prevUrl = currentUrl[0];
+          loading[0] = true;
+          infoView.setText("폴더 목록을 불러오는 중…");
+          new Thread(
+              () -> {
+                try {
+                  List<WebDav.Entry> entries = WebDav.list(nextUrl, auth);
+                  runOnUiThread(
+                      () -> {
+                        loading[0] = false;
+                        history.push(prevUrl);
+                        apply.accept(nextUrl, entries);
+                      });
+                } catch (Exception ex) {
+                  runOnUiThread(
+                      () -> {
+                        loading[0] = false;
+                        alert("폴더 읽기 실패", Library.reason(ex));
+                      });
+                }
+              })
+              .start();
+        });
+
+    apply.accept(initialUrl, initialEntries);
+    builder
+        .setTitle("PikPak 폴더 선택")
+        .setView(box)
+        .setPositiveButton(
+            "이 폴더 연결",
+            (d, w) -> {
+              String target = currentUrl[0];
+              try {
+                long sid = db.register(target, user, pass);
+                db.reconnect(sid);
+                setSourceMode(sid, SOURCE_ON);
+                toast(WebDav.displayName(target) + " 연결을 시작합니다.");
+                scan(Collections.singletonList(sid));
+              } catch (Exception ex) {
+                alert("연결 실패", Library.reason(ex));
+              }
+            })
+        .setNegativeButton("취소", null)
+        .show();
+  }
+
+  /** 연결된 원격 폴더(PC · PikPak)를 폴더별로 켜기/보관본만/숨김, 비밀번호 수정, 연결 해제한다. */
+  void remoteSourcesDialog() {
+    List<Library.Source> list = db.remoteSources();
+    if (list.isEmpty()) {
+      dialog()
+          .setTitle("원격 폴더 관리")
+          .setMessage("연결된 PC 원격 폴더나 PikPak 폴더가 없습니다.")
+          .setPositiveButton("PikPak 연결", (d, w) -> pikpak())
+          .setNeutralButton("PC 원격 연결", (d, w) -> remote())
+          .setNegativeButton("닫기", null)
+          .show();
+      return;
+    }
+    String[] rows = new String[list.size()];
+    for (int i = 0; i < list.size(); i++) {
+      Library.Source s = list.get(i);
+      int mode = sourceMode(s.id, s.url);
+      int count = db.sourceBookCount(s.id);
+      rows[i] = WebDav.displayName(s.url) + "\n" + sourceModeLabel(mode) + "  ·  " + count + "권";
+    }
+    dialog()
+        .setTitle("원격 폴더 관리")
+        .setItems(rows, (d, i) -> remoteSourceActions(list.get(i)))
+        .setPositiveButton("PikPak 추가", (d, w) -> pikpak())
+        .setNeutralButton("PC 원격 추가", (d, w) -> remote())
+        .setNegativeButton("닫기", null)
+        .show();
+  }
+
+  void remoteSourceActions(Library.Source src) {
+    int mode = sourceMode(src.id, src.url);
+    String[] items = {
+      (mode == SOURCE_ON ? "✓ " : "") + "켜짐 (전체 표시 · 새로고침 연결)",
+      (mode == SOURCE_CACHED_ONLY ? "✓ " : "") + "보관본만 보기 (오프라인 · 연결 안 함)",
+      (mode == SOURCE_HIDDEN ? "✓ " : "") + "숨김 (책 숨김 · 연결 안 함)",
+      "이 폴더만 다시 읽기",
+      "계정 · 비밀번호 수정",
+      "연결 해제"
+    };
+    choices(
+        WebDav.displayName(src.url),
+        items,
+        i -> {
+          if (i >= 0 && i <= 2) {
+            setSourceMode(src.id, i);
+            selected = "";
+            library(true);
+            if (i == SOURCE_ON) {
+              toast("전체 책을 표시하고 새로고침 시 연결합니다.");
+              scan(Collections.singletonList(src.id));
+            } else if (i == SOURCE_CACHED_ONLY) {
+              toast("미리 받아 둔 보관본만 표시하고 서버에 연결하지 않습니다.");
+            } else {
+              toast("이 폴더의 책을 숨기고 서버에 연결하지 않습니다.");
+            }
+            return;
+          }
+          if (i == 3) {
+            if (mode != SOURCE_ON) setSourceMode(src.id, SOURCE_ON);
+            scan(Collections.singletonList(src.id));
+            return;
+          }
+          if (i == 4) {
+            editSourceAuthDialog(src);
+            return;
+          }
+          if (i == 5) {
+            dialog()
+                .setTitle("원격 폴더 연결 해제")
+                .setMessage(
+                    WebDav.displayName(src.url)
+                        + " 연결을 해제하고 서재 목록 및 보관본을 정리합니다.\n원본 파일("
+                        + (WebDav.isPikPak(src.url) ? "PikPak" : "PC")
+                        + ")은 지워지지 않습니다.")
+                .setPositiveButton(
+                    "연결 해제",
+                    (d, w) -> {
+                      if (loadingBook) abortActiveDownload();
+                      worker.execute(
+                          () -> {
+                            db.removeSource(src.id);
+                            prefs.edit().remove("sourceMode-" + src.id).apply();
+                            runOnUiThread(
+                                () -> {
+                                  if (isDestroyed()) return;
+                                  selected = "";
+                                  library(false);
+                                  toast("원격 폴더 연결을 해제했습니다.");
+                                });
+                          });
+                    })
+                .setNegativeButton("취소", null)
+                .show();
+          }
+        });
+  }
+
+  void editSourceAuthDialog(Library.Source src) {
+    LinearLayout box = col();
+    pad(box, 22, 8);
+    TextView note =
+        label(
+            "계정이나 비밀번호가 바뀌어도 기존 책 목록·읽던 위치·보관본은 그대로 유지됩니다.",
+            12,
+            muted,
+            false);
+    note.setPadding(0, 0, 0, dp(8));
+    box.addView(note);
+    EditText userEdit = new EditText(this);
+    userEdit.setSingleLine();
+    userEdit.setHint("사용자 이름");
+    userEdit.setText(src.user);
+    box.addView(userEdit);
+    EditText passEdit = new EditText(this);
+    passEdit.setSingleLine();
+    passEdit.setHint("새 비밀번호");
+    passEdit.setInputType(129);
+    box.addView(passEdit);
+    dialog()
+        .setTitle("계정 · 비밀번호 수정")
+        .setView(box)
+        .setPositiveButton(
+            "확인 후 저장",
+            (d, w) -> {
+              String u = userEdit.getText().toString().trim();
+              String p = passEdit.getText().toString();
+              toast("연결을 확인하고 있습니다…");
+              new Thread(
+                  () -> {
+                    try {
+                      WebDav.list(src.url, WebDav.auth(u, p));
+                      db.updateSourceAuth(src.id, u, p);
+                      runOnUiThread(
+                          () -> {
+                            if (isDestroyed()) return;
+                            setSourceMode(src.id, SOURCE_ON);
+                            toast("계정 정보를 저장했습니다.");
+                            scan(Collections.singletonList(src.id));
+                          });
+                    } catch (Exception ex) {
+                      runOnUiThread(() -> alert("인증 확인 실패", Library.reason(ex)));
                     }
                   })
                   .start();
@@ -3395,10 +3819,23 @@ public final class Main extends Activity {
   boolean refreshSources(boolean pulled) {
     if (!scanning.isEmpty()) return false;
     List<Long> ids = new ArrayList<>();
-    for (String s : db.strings(remoteOn() ? "SELECT id FROM sources" : "SELECT id FROM sources WHERE url NOT LIKE 'http%'")) ids.add(Long.valueOf(s));
-    if (ids.isEmpty()) {
+    int totalSources = 0;
+    try (android.database.Cursor c =
+        db.getReadableDatabase().rawQuery("SELECT id,url FROM sources", null)) {
+      while (c.moveToNext()) {
+        totalSources++;
+        long id = c.getLong(0);
+        String url = c.getString(1) == null ? "" : c.getString(1);
+        if (!WebDav.isUrl(url) || sourceMode(id, url) == SOURCE_ON) ids.add(id);
+      }
+    }
+    if (totalSources == 0) {
       if (pulled) toast("연결된 폴더가 없습니다.");
       else addMenu();
+      return false;
+    }
+    if (ids.isEmpty()) {
+      toast("새로고침할 활성 폴더가 없습니다.");
       return false;
     }
     scan(ids);
@@ -3414,7 +3851,8 @@ public final class Main extends Activity {
     worker.execute(
         () -> {
           ArrayList<String> problems = new ArrayList<>();
-          for (long id : batch)
+          for (long id : batch) {
+            Library.Source src = db.source(id);
             try {
               db.scan(
                   id,
@@ -3423,15 +3861,19 @@ public final class Main extends Activity {
                     handler.postDelayed(refresh, 650);
                   });
             } catch (Exception e) {
-              problems.add(Library.reason(e));
+              String reason = Library.reason(e);
+              if (src != null && WebDav.isUrl(src.url))
+                problems.add("[" + WebDav.displayName(src.url) + "] " + reason);
+              else problems.add(reason);
             }
+          }
           runOnUiThread(
               () -> {
                 if (isDestroyed()) return;
                 scanning.removeAll(batch);
                 if (scanning.isEmpty()) scanMessage = "";
                 library(true);
-                if (!problems.isEmpty()) alert("폴더를 읽을 수 없습니다", TextUtils.join("\n", problems));
+                if (!problems.isEmpty()) alert("폴더를 읽을 수 없습니다", TextUtils.join("\n\n", problems));
               });
         });
   }
@@ -3440,8 +3882,16 @@ public final class Main extends Activity {
     long[] remoteUsage = RemoteBooks.usage(this);
     String remoteStorageLabel =
         remoteUsage[1] > 0
-            ? "PC 원격 보관함 관리 · " + RemoteBooks.formatSize(remoteUsage[1])
-            : "PC 원격 보관함 관리";
+            ? "원격 보관함 관리 · " + RemoteBooks.formatSize(remoteUsage[1])
+            : "원격 보관함 관리";
+    List<Library.Source> remoteSrcs = db.remoteSources();
+    int activeRemote = 0;
+    for (Library.Source s : remoteSrcs)
+      if (sourceMode(s.id, s.url) == SOURCE_ON) activeRemote++;
+    String remoteManageLabel =
+        remoteSrcs.isEmpty()
+            ? "원격 폴더 관리 · 없음"
+            : "원격 폴더 관리 · " + activeRemote + "/" + remoteSrcs.size() + " 켜짐";
     choices(
         "서재 설정",
         new String[] {
@@ -3455,7 +3905,7 @@ public final class Main extends Activity {
           "앱 업데이트 확인",
           "책 이름만 표시 · " + (prefs.getBoolean("hideVolumeTags", true) ? "켜짐" : "꺼짐"),
           "작품 수 표시 · " + (showShelfCount() ? "켜짐" : "꺼짐"),
-          "PC 원격 폴더 · " + (remoteOn() ? "켜짐" : "꺼짐"),
+          remoteManageLabel,
           remoteStorageLabel
         },
         i -> {
@@ -3492,14 +3942,7 @@ public final class Main extends Activity {
             toast(next ? "책장에 작품 수를 표시합니다." : "책장에서 작품 수를 숨깁니다.");
           }
           if (i == 11) remoteStorage();
-          if (i == 10) {
-            boolean next = !remoteOn();
-            prefs.edit().putBoolean("remoteOn", next).apply();
-            selected = "";
-            renderNow(true);
-            if (next) refreshSources(false);
-            toast(next ? "PC 원격 폴더의 책을 함께 표시합니다." : "PC 원격 폴더의 책을 숨기고 연결하지 않습니다.");
-          }
+          if (i == 10) remoteSourcesDialog();
           if (i == 6) {
             worker.execute(
                 () -> {
@@ -3591,20 +4034,31 @@ public final class Main extends Activity {
     LinkedHashSet<String> cachedFiles = new LinkedHashSet<>();
     long cachedBytes = 0;
     int cachedVolumes = 0;
+    List<Library.Book> uncachedTargets = new ArrayList<>();
+    Set<String> seenUncachedOuter = new HashSet<>();
     if (inSeriesDetail) {
-      if (WebDav.isUrl(b.url) && RemoteBooks.hasAny(this, b.url)) {
-        cachedFiles.add(RemoteBooks.fileName(b.url));
-        cachedBytes = RemoteBooks.itemBytes(this, b.url);
-        cachedVolumes = 1;
+      if (WebDav.isUrl(b.url)) {
+        if (RemoteBooks.hasAny(this, b.url)) {
+          cachedFiles.add(RemoteBooks.fileName(b.url));
+          cachedBytes = RemoteBooks.itemBytes(this, b.url);
+          cachedVolumes = 1;
+        }
+        if (!RemoteBooks.has(this, b.url)) uncachedTargets.add(b);
       }
     } else {
       List<Library.Book> group = groups.get(b.grp);
       if (group != null) {
         for (Library.Book item : group) {
-          if (WebDav.isUrl(item.url) && RemoteBooks.hasAny(this, item.url)) {
-            cachedVolumes++;
-            String fn = RemoteBooks.fileName(item.url);
-            if (cachedFiles.add(fn)) cachedBytes += RemoteBooks.itemBytes(this, item.url);
+          if (WebDav.isUrl(item.url)) {
+            if (RemoteBooks.hasAny(this, item.url)) {
+              cachedVolumes++;
+              String fn = RemoteBooks.fileName(item.url);
+              if (cachedFiles.add(fn)) cachedBytes += RemoteBooks.itemBytes(this, item.url);
+            }
+            if (!RemoteBooks.has(this, item.url)
+                && seenUncachedOuter.add(RemoteBooks.outer(item.url))) {
+              uncachedTargets.add(item);
+            }
           }
         }
       }
@@ -3621,7 +4075,17 @@ public final class Main extends Activity {
                 "시리즈명 변경",
                 "다른 시리즈에 합치기",
                 "이 권을 별도 시리즈로 분리"));
+    int prefetchIndex = -1;
+    if (!uncachedTargets.isEmpty()) {
+      prefetchIndex = menuItems.size();
+      menuItems.add(
+          inSeriesDetail || uncachedTargets.size() == 1
+              ? "휴대폰에 미리 받기"
+              : "휴대폰에 미리 받기  ·  " + uncachedTargets.size() + "개 파일");
+    }
+    int deleteCacheIndex = -1;
     if (!cachedFiles.isEmpty()) {
+      deleteCacheIndex = menuItems.size();
       menuItems.add(
           inSeriesDetail
               ? "원격 보관함에서 삭제  ·  " + RemoteBooks.formatSize(cachedBytes)
@@ -3631,11 +4095,17 @@ public final class Main extends Activity {
                   + RemoteBooks.formatSize(cachedBytes));
     }
     long fCachedBytes = cachedBytes;
+    int fPrefetchIndex = prefetchIndex;
+    int fDeleteCacheIndex = deleteCacheIndex;
     choices(
         volumeTitle(b),
         menuItems.toArray(new String[0]),
         i -> {
-          if (i == 9 && !cachedFiles.isEmpty()) {
+          if (i == fPrefetchIndex && !uncachedTargets.isEmpty()) {
+            prefetchRemoteBooks(uncachedTargets);
+            return;
+          }
+          if (i == fDeleteCacheIndex && !cachedFiles.isEmpty()) {
             String targetName =
                 inSeriesDetail
                     ? volumeTitle(b)
@@ -3646,7 +4116,7 @@ public final class Main extends Activity {
                     targetName
                         + " ("
                         + RemoteBooks.formatSize(fCachedBytes)
-                        + ")을 휴대폰 보관함에서 지웁니다. PC 원본은 유지됩니다.")
+                        + ")을 휴대폰 보관함에서 지웁니다. 원본 파일은 유지됩니다.")
                 .setPositiveButton(
                     "삭제",
                     (d, w) -> {
@@ -3912,6 +4382,106 @@ public final class Main extends Activity {
     updateScanBanner();
   }
 
+  /** 원격 책 여러 권을 열지 않고 미리 휴대폰 보관함에 받아 둔다(PikPak 프리미엄 구간 활용용). */
+  void prefetchRemoteBooks(List<Library.Book> targets) {
+    if (targets == null || targets.isEmpty()) return;
+    abortActiveDownload();
+    int token = ++requestId;
+    loadingBook = true;
+    RemoteBooks.Cancel cancel = new RemoteBooks.Cancel();
+    activeDownload = cancel;
+    getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    scanMessage = "미리 받기를 시작합니다…";
+    if (reader == null) updateScanBanner();
+    readerIO.execute(
+        () -> {
+          int completed = 0;
+          try {
+            for (int idx = 0; idx < targets.size(); idx++) {
+              if (token != requestId || isDestroyed() || cancel.isCancelled()) break;
+              Library.Book b = targets.get(idx);
+              if (RemoteBooks.has(this, b.url)) {
+                completed++;
+                continue;
+              }
+              int pos = idx + 1, count = targets.size();
+              String origin = WebDav.isPikPak(b.url) ? "PikPak" : "PC";
+              RemoteBooks.download(
+                  this,
+                  b.url,
+                  db.httpAuth(b.source),
+                  new RemoteBooks.Progress() {
+                    public void update(long done, long total) {
+                      runOnUiThread(
+                          () -> {
+                            if (token != requestId || isDestroyed()) return;
+                            String prefix = count > 1 ? "[" + pos + "/" + count + "] " : "";
+                            scanMessage =
+                                String.format(
+                                    Locale.KOREA,
+                                    "%s%s에서 미리 받는 중 %d%%  ·  %d / %dMB",
+                                    prefix,
+                                    origin,
+                                    total > 0 ? done * 100 / total : 0,
+                                    done >> 20,
+                                    total >> 20);
+                            updateScanBanner();
+                          });
+                    }
+
+                    public boolean cancelled() {
+                      return token != requestId || isDestroyed();
+                    }
+                  },
+                  cancel);
+              completed++;
+              runOnUiThread(
+                  () -> {
+                    if (!isDestroyed() && reader == null) refreshRemoteEntries();
+                  });
+            }
+            int doneCount = completed;
+            runOnUiThread(
+                () -> {
+                  if (isDestroyed() || token != requestId) return;
+                  loadingBook = false;
+                  scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+                  updateScanBanner();
+                  if (reader == null) refreshRemoteEntries();
+                  toast(
+                      doneCount <= 1
+                          ? "휴대폰 보관함에 저장했습니다."
+                          : doneCount + "개 파일을 휴대폰 보관함에 저장했습니다.");
+                });
+          } catch (Exception e) {
+            runOnUiThread(
+                () -> {
+                  if (isDestroyed() || token != requestId) return;
+                  loadingBook = false;
+                  scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+                  updateScanBanner();
+                  if (reader == null) refreshRemoteEntries();
+                  if (e instanceof InterruptedIOException) return;
+                  if (e instanceof RemoteBooks.Incomplete) {
+                    RemoteBooks.Incomplete x = (RemoteBooks.Incomplete) e;
+                    alert(
+                        "미리 받기가 중간에 끊겼습니다",
+                        (x.total > 0 ? x.done * 100 / x.total : 0)
+                            + "%까지 휴대폰에 저장했습니다. 다시 시도하면 이어서 받습니다.\n\n원인: "
+                            + Library.reason(e));
+                  } else alert("미리 받기 실패", Library.reason(e));
+                });
+          } finally {
+            if (activeDownload == cancel) activeDownload = null;
+            runOnUiThread(
+                () -> {
+                  if (token == requestId && !isDestroyed())
+                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                });
+          }
+        });
+  }
+
   void open(Library.Book b) {
     remember();
     resumeDismissed = false;
@@ -3934,7 +4504,8 @@ public final class Main extends Activity {
                       getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                   });
             if (fetching) {
-              // PC 원격 책은 처음 열 때 권 전체를 받아 보관함에 저장한 뒤 연다(이후 오프라인으로도 열림).
+              String origin = WebDav.isPikPak(b.url) ? "PikPak" : "PC";
+              // 원격 책은 처음 열 때 권 전체를 받아 보관함에 저장한 뒤 연다(이후 오프라인으로도 열림).
               RemoteBooks.download(
                   this,
                   b.url,
@@ -3947,7 +4518,8 @@ public final class Main extends Activity {
                             scanMessage =
                                 String.format(
                                     Locale.KOREA,
-                                    "PC에서 받는 중 %d%%  ·  %d / %dMB",
+                                    "%s에서 받는 중 %d%%  ·  %d / %dMB",
+                                    origin,
                                     total > 0 ? done * 100 / total : 0,
                                     done >> 20,
                                     total >> 20);

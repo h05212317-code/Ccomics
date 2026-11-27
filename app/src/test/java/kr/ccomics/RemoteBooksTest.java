@@ -539,4 +539,103 @@ public class RemoteBooksTest {
     }
     assertTrue(f.setLastModified(modified));
   }
+
+  @Test
+  public void pikpakConcurrencySettingsAnd429RedirectDownload() throws Exception {
+    assertEquals(RemoteBooks.PIKPAK_PARALLEL, RemoteBooks.parallelFor("https://dav.pikpak.ai/a.zip"));
+    assertEquals(RemoteBooks.PIKPAK_PIECE, RemoteBooks.pieceFor("https://dav.pikpak.ai/a.zip"));
+    assertEquals(RemoteBooks.PARALLEL, RemoteBooks.parallelFor("https://pc.ts.net/ccomics/a.zip"));
+    assertEquals(RemoteBooks.PIECE, RemoteBooks.pieceFor("https://pc.ts.net/ccomics/a.zip"));
+
+    byte[] bytes = new byte[5_000_000];
+    new Random(11).nextBytes(bytes);
+    AtomicInteger hits = new AtomicInteger();
+    MockWebServer s = new MockWebServer();
+    s.setDispatcher(
+        new Dispatcher() {
+          public MockResponse dispatch(RecordedRequest r) {
+            if (r.getPath().startsWith("/cdn/")) {
+              if (hits.incrementAndGet() == 2) {
+                return new MockResponse().setResponseCode(429).setHeader("Retry-After", "1");
+              }
+              return range(bytes, r, 512_000);
+            }
+            return new MockResponse().setResponseCode(302).setHeader("Location", "/cdn/pik.zip");
+          }
+        });
+    s.start();
+    Context ctx = RuntimeEnvironment.getApplication();
+    RemoteBooks.clear(ctx);
+    String url = s.url("/pik.zip").toString();
+    try {
+      File out = RemoteBooks.download(ctx, url, WebDav.auth("u", "p"), quiet());
+      assertArrayEquals(bytes, java.nio.file.Files.readAllBytes(out.toPath()));
+    } finally {
+      RemoteBooks.clear(ctx);
+      s.shutdown();
+    }
+  }
+
+  @Test
+  public void perSourceModesCachedOnlyHiddenAndRemoveSource() throws Exception {
+    Main host = org.robolectric.Robolectric.buildActivity(Main.class).get();
+    host.prefs = host.getSharedPreferences("per-source-test", 0);
+    host.prefs.edit().clear().apply();
+    host.frame = new android.widget.FrameLayout(host);
+    host.setContentView(host.frame);
+    host.theme();
+    RemoteBooks.clear(host);
+    try (Library lib = new Library(host)) {
+      host.db = lib;
+      String pcUrl = "https://pc.example/ccomics/pc-1.zip";
+      String pikCached = "https://dav.pikpak.ai/%EB%A7%8C%ED%99%94/pik-1.zip";
+      String pikUncached = "https://dav.pikpak.ai/%EB%A7%8C%ED%99%94/pik-2.zip";
+      String localUrl = "content://local/1";
+      lib.exec("INSERT INTO sources(id,url,user,secret) VALUES(1,'https://pc.example/ccomics/','u1','')");
+      lib.exec("INSERT INTO sources(id,url,user,secret) VALUES(2,'https://dav.pikpak.ai/%EB%A7%8C%ED%99%94/','u2','')");
+      lib.exec("INSERT INTO sources(id,url,user,secret) VALUES(3,'content://local/','','')");
+      lib.exec(
+          "INSERT INTO books(source,url,title,series,grp,size,changed,seen,pages) VALUES"
+              + "(1,?,'PC작 1권','PC작','series:pc',100,1,1,10),"
+              + "(2,?,'픽팍작 1권','픽팍작','series:pik',100,1,1,10),"
+              + "(2,?,'픽팍작 2권','픽팍작','series:pik',100,1,1,10),"
+              + "(3,?,'로컬작 1권','로컬작','series:loc',100,1,1,10)",
+          pcUrl,
+          pikCached,
+          pikUncached,
+          localUrl);
+      assertTrue(RemoteBooks.file(host, pikCached).createNewFile());
+
+      // 레거시 remoteOn=false 마이그레이션: 개별 설정이 없으면 숨김으로 취급
+      host.prefs.edit().putBoolean("remoteOn", false).apply();
+      assertEquals(Main.SOURCE_HIDDEN, host.sourceMode(1, "https://pc.example/ccomics/"));
+      assertEquals(Main.SOURCE_HIDDEN, host.sourceMode(2, "https://dav.pikpak.ai/%EB%A7%8C%ED%99%94/"));
+
+      // PC=숨김, PikPak=보관본만 -> 로컬 + 받아 둔 픽팍 1권만 표시
+      host.setSourceMode(1, Main.SOURCE_HIDDEN);
+      host.setSourceMode(2, Main.SOURCE_CACHED_ONLY);
+      host.library(false);
+      long deadline = System.currentTimeMillis() + 3000;
+      while (host.books.size() != 2 && System.currentTimeMillis() < deadline) {
+        org.robolectric.shadows.ShadowLooper.idleMainLooper();
+        Thread.sleep(20);
+      }
+      assertEquals(2, host.books.size());
+      Set<String> shownUrls = new HashSet<>();
+      for (Library.Book b : host.books) shownUrls.add(b.url);
+      assertTrue(shownUrls.contains(localUrl));
+      assertTrue(shownUrls.contains(pikCached));
+      assertFalse(shownUrls.contains(pikUncached));
+      assertFalse(shownUrls.contains(pcUrl));
+
+      // PikPak 연결 해제 시 책·소스·캐시가 함께 정리된다.
+      lib.removeSource(2);
+      assertEquals(1, lib.remoteSources().size());
+      assertEquals(1L, lib.remoteSources().get(0).id);
+      assertFalse(RemoteBooks.has(host, pikCached));
+      assertEquals(0, lib.sourceBookCount(2));
+    } finally {
+      RemoteBooks.clear(host);
+    }
+  }
 }

@@ -23,6 +23,16 @@ import okhttp3.*;
 final class RemoteBooks {
   /** Funnel 실측: 연결 1개 0.47MB/s, 4개 1.74MB/s, 8개 2.31MB/s, 16개 2.38MB/s. */
   static final int PARALLEL = 8, PIECE = 2 << 20, ATTEMPTS = 8;
+  /** PikPak WebDAV는 동시 연결이 과하면 429 제한이 걸릴 수 있어 연결 수를 낮추고 조각을 키운다. */
+  static final int PIKPAK_PARALLEL = 3, PIKPAK_PIECE = 4 << 20;
+
+  static int parallelFor(String url) {
+    return WebDav.isPikPak(url) ? PIKPAK_PARALLEL : PARALLEL;
+  }
+
+  static int pieceFor(String url) {
+    return WebDav.isPikPak(url) ? PIKPAK_PIECE : PIECE;
+  }
 
   private static final long PIECE_MAGIC = 0x43435032L;
   private static final ConcurrentHashMap<String, Object> LOCKS = new ConcurrentHashMap<>();
@@ -236,12 +246,16 @@ final class RemoteBooks {
       if (!complete && partFile != null && piecesFile != null) {
         long total = partFile.length();
         if (total > 0) {
-          int count = (int) ((total + PIECE - 1) / PIECE);
-          BitSet done = loadPieces(piecesFile, total);
-          long got = 0;
-          for (int i = done.nextSetBit(0); i >= 0 && i < count; i = done.nextSetBit(i + 1))
-            got += Math.min(total, (long) (i + 1) * PIECE) - (long) i * PIECE;
-          percent = (int) Math.min(99, got * 100 / total);
+          PieceInfo info = loadPiecesInfo(piecesFile, total);
+          if (info.pieceSize > 0) {
+            int count = (int) ((total + info.pieceSize - 1) / info.pieceSize);
+            long got = 0;
+            for (int i = info.done.nextSetBit(0);
+                i >= 0 && i < count;
+                i = info.done.nextSetBit(i + 1))
+              got += Math.min(total, (long) (i + 1) * info.pieceSize) - (long) i * info.pieceSize;
+            percent = (int) Math.min(99, got * 100 / total);
+          }
         }
       }
       out.add(new Item(base, bytes, modified, complete, percent));
@@ -311,10 +325,12 @@ final class RemoteBooks {
     return (cancel != null && cancel.isCancelled()) || (progress != null && progress.cancelled());
   }
 
-  private static Response executeTracked(Call call) throws IOException {
+  private static Response executeTracked(Call call, String url) throws IOException {
     try {
       return call.execute();
     } catch (UnknownHostException | ConnectException | SocketTimeoutException e) {
+      if (WebDav.isPikPak(url))
+        throw new IOException("PikPak 서버에 연결할 수 없습니다. 인터넷 연결과 서버 주소를 확인하세요.");
       throw new IOException("PC에 연결할 수 없습니다. PC 전원과 Ccomics PC 서버 실행을 확인하세요.");
     }
   }
@@ -326,12 +342,25 @@ final class RemoteBooks {
       if (isCancelled(cancel, progress)) throw new CancelledException();
       Call call = CLIENT.newCall(request(url, auth).header("Range", "bytes=0-0").build());
       cancel.track(call);
-      try (Response res = executeTracked(call)) {
-        if (res.code() != 206) throw WebDav.fail(res.code() == 200 ? 416 : res.code());
-        String cr = res.header("Content-Range", "");
-        int slash = cr.lastIndexOf('/');
-        if (slash < 0) throw new IOException("PC 서버가 파일 크기를 알려 주지 않았습니다.");
-        return Long.parseLong(cr.substring(slash + 1).trim());
+      try (Response res = executeTracked(call, url)) {
+        if (res.code() == 429) {
+          last = WebDav.fail(429, url);
+          pauseMs(WebDav.retryDelayMs(res, attempt), cancel, progress);
+          continue;
+        }
+        if (res.code() == 206) {
+          String cr = res.header("Content-Range", "");
+          int slash = cr.lastIndexOf('/');
+          if (slash < 0)
+            throw new IOException(
+                (WebDav.isPikPak(url) ? "PikPak 서버" : "PC 서버") + "가 파일 크기를 알려 주지 않았습니다.");
+          return Long.parseLong(cr.substring(slash + 1).trim());
+        }
+        if (res.code() == 200) {
+          long cl = res.body() != null ? res.body().contentLength() : -1;
+          if (cl > 0) return cl;
+        }
+        throw WebDav.fail(res.code() == 200 ? 416 : res.code(), url);
       } catch (IOException e) {
         if (isCancelled(cancel, progress)) throw new CancelledException();
         last = e;
@@ -351,7 +380,12 @@ final class RemoteBooks {
 
   private static void pause(int attempt, Cancel cancel, Progress progress)
       throws CancelledException {
-    long until = System.currentTimeMillis() + Math.min(8000L, 500L << attempt);
+    pauseMs(Math.min(8000L, 500L << attempt), cancel, progress);
+  }
+
+  private static void pauseMs(long delayMs, Cancel cancel, Progress progress)
+      throws CancelledException {
+    long until = System.currentTimeMillis() + Math.max(100L, delayMs);
     while (true) {
       if (isCancelled(cancel, progress)) throw new CancelledException();
       long left = until - System.currentTimeMillis();
@@ -364,25 +398,40 @@ final class RemoteBooks {
     }
   }
 
-  /** 받은 조각 기록: 매직 + 조각 크기 + 전체 크기 + 조각별 완료 여부. */
-  private static BitSet loadPieces(File map, long total) {
-    try (DataInputStream in = new DataInputStream(new FileInputStream(map))) {
-      if (in.readLong() != PIECE_MAGIC) return new BitSet();
-      if (in.readInt() != PIECE) return new BitSet();
-      if (in.readLong() != total) return new BitSet();
-      byte[] bits = new byte[in.readInt()];
-      in.readFully(bits);
-      return BitSet.valueOf(bits);
-    } catch (IOException e) {
-      return new BitSet();
+  private static final class PieceInfo {
+    final int pieceSize;
+    final BitSet done;
+
+    PieceInfo(int pieceSize, BitSet done) {
+      this.pieceSize = pieceSize;
+      this.done = done;
     }
   }
 
-  private static void savePieces(File map, long total, BitSet done) {
+  private static PieceInfo loadPiecesInfo(File map, long total) {
+    try (DataInputStream in = new DataInputStream(new FileInputStream(map))) {
+      if (in.readLong() != PIECE_MAGIC) return new PieceInfo(0, new BitSet());
+      int pieceSize = in.readInt();
+      if (pieceSize <= 0 || in.readLong() != total) return new PieceInfo(0, new BitSet());
+      byte[] bits = new byte[in.readInt()];
+      in.readFully(bits);
+      return new PieceInfo(pieceSize, BitSet.valueOf(bits));
+    } catch (IOException e) {
+      return new PieceInfo(0, new BitSet());
+    }
+  }
+
+  /** 받은 조각 기록: 매직 + 조각 크기 + 전체 크기 + 조각별 완료 여부. */
+  private static BitSet loadPieces(File map, long total, int pieceSize) {
+    PieceInfo info = loadPiecesInfo(map, total);
+    return info.pieceSize == pieceSize ? info.done : new BitSet();
+  }
+
+  private static void savePieces(File map, long total, int pieceSize, BitSet done) {
     File tmp = new File(map.getPath() + ".tmp");
     try (DataOutputStream out = new DataOutputStream(new FileOutputStream(tmp))) {
       out.writeLong(PIECE_MAGIC);
-      out.writeInt(PIECE);
+      out.writeInt(pieceSize);
       out.writeLong(total);
       byte[] bits = done.toByteArray();
       out.writeInt(bits.length);
@@ -409,28 +458,33 @@ final class RemoteBooks {
     if (out.isFile()) return out;
     Cancel cancel = externalCancel != null ? externalCancel : new Cancel();
     String url = outer(bookUrl);
+    int parallel = parallelFor(url);
+    int pieceSize = pieceFor(url);
+    boolean pikpak = WebDav.isPikPak(url);
     Object lock = LOCKS.computeIfAbsent(url, k -> new Object());
     synchronized (lock) {
       if (out.isFile()) return out;
       if (isCancelled(cancel, progress)) throw new CancelledException();
       File part = new File(out.getPath() + ".part"), map = new File(out.getPath() + ".pieces");
       long total = probe(url, auth, cancel, progress);
-      int pieces = (int) ((total + PIECE - 1) / PIECE);
+      int pieces = (int) ((total + pieceSize - 1) / pieceSize);
       BitSet done =
-          part.isFile() && part.length() == total ? loadPieces(map, total) : new BitSet();
+          part.isFile() && part.length() == total
+              ? loadPieces(map, total, pieceSize)
+              : new BitSet();
       long already = 0;
       for (int i = done.nextSetBit(0); i >= 0 && i < pieces; i = done.nextSetBit(i + 1))
-        already += Math.min(total, (long) (i + 1) * PIECE) - (long) i * PIECE;
+        already += Math.min(total, (long) (i + 1) * pieceSize) - (long) i * pieceSize;
       AtomicLong received = new AtomicLong(already);
       ConcurrentLinkedQueue<Integer> queue = new ConcurrentLinkedQueue<>();
       for (int i = 0; i < pieces; i++) if (!done.get(i)) queue.add(i);
       AtomicReference<IOException> error = new AtomicReference<>();
-      ExecutorService pool = Executors.newFixedThreadPool(PARALLEL);
+      ExecutorService pool = Executors.newFixedThreadPool(parallel);
       cancel.bind(pool);
       try (RandomAccessFile raf = new RandomAccessFile(part, "rw")) {
         if (raf.length() != total) raf.setLength(total);
         FileChannel channel = raf.getChannel();
-        for (int w = 0; w < PARALLEL; w++)
+        for (int w = 0; w < parallel; w++)
           pool.execute(
               () -> {
                 byte[] buf = new byte[64 << 10];
@@ -438,7 +492,7 @@ final class RemoteBooks {
                 while (error.get() == null
                     && !isCancelled(cancel, progress)
                     && (i = queue.poll()) != null) {
-                  long start = (long) i * PIECE, end = Math.min(total, start + PIECE) - 1;
+                  long start = (long) i * pieceSize, end = Math.min(total, start + pieceSize) - 1;
                   long pos = start;
                   for (int attempt = 0; ; attempt++) {
                     if (isCancelled(cancel, progress)) {
@@ -451,11 +505,21 @@ final class RemoteBooks {
                         CLIENT.newCall(
                             request(url, auth).header("Range", "bytes=" + pos + "-" + end).build());
                     cancel.track(call);
-                    try (Response res = executeTracked(call)) {
-                      if (res.code() != 206)
-                        throw WebDav.fail(res.code() == 200 ? 416 : res.code());
+                    try (Response res = executeTracked(call, url)) {
+                      if (res.code() == 429) {
+                        if (attempt + 1 >= ATTEMPTS) {
+                          error.compareAndSet(null, WebDav.fail(429, url));
+                          cancel.cancel();
+                          return;
+                        }
+                        pauseMs(WebDav.retryDelayMs(res, attempt), cancel, progress);
+                        continue;
+                      }
+                      if (res.code() != 206 && !(res.code() == 200 && pos == 0 && end == total - 1))
+                        throw WebDav.fail(res.code() == 200 ? 416 : res.code(), url);
                       ResponseBody body = res.body();
-                      if (body == null) throw new IOException("PC 서버가 빈 응답을 보냈습니다.");
+                      if (body == null)
+                        throw new IOException((pikpak ? "PikPak 서버" : "PC 서버") + "가 빈 응답을 보냈습니다.");
                       InputStream in = body.byteStream();
                       int n;
                       while (pos <= end
@@ -467,10 +531,11 @@ final class RemoteBooks {
                         pos += n;
                         received.addAndGet(n);
                       }
-                      if (pos <= end) throw new EOFException("PC 연결이 중간에 끊겼습니다.");
+                      if (pos <= end)
+                        throw new EOFException((pikpak ? "PikPak" : "PC") + " 연결이 중간에 끊겼습니다.");
                       synchronized (done) {
                         done.set(i);
-                        savePieces(map, total, done);
+                        savePieces(map, total, pieceSize, done);
                       }
                       break;
                     } catch (CancelledException e) {
@@ -486,7 +551,7 @@ final class RemoteBooks {
                       if (error.get() != null) return;
                       IOException wrapped =
                           e instanceof SocketTimeoutException
-                              ? new IOException("PC 응답이 지연되었습니다.")
+                              ? new IOException((pikpak ? "PikPak" : "PC") + " 응답이 지연되었습니다.")
                               : e;
                       // 끊긴 지점부터 다시 요청한다(받은 바이트는 그대로 둔다).
                       if (fatal(wrapped) || attempt + 1 >= ATTEMPTS) {
@@ -526,7 +591,7 @@ final class RemoteBooks {
         cancel.bind(null);
       }
       synchronized (done) {
-        savePieces(map, total, done);
+        savePieces(map, total, pieceSize, done);
       }
       if (error.get() != null) {
         if (error.get() instanceof CancelledException) throw error.get();

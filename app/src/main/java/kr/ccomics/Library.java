@@ -175,6 +175,82 @@ final class Library extends SQLiteOpenHelper {
     return new String(cipher.doFinal(Base64.decode(s[1], 2)), "UTF-8");
   }
 
+  static final class Source {
+    final long id;
+    final String url, user;
+
+    Source(long id, String url, String user) {
+      this.id = id;
+      this.url = url;
+      this.user = user;
+    }
+  }
+
+  List<Source> remoteSources() {
+    List<Source> out = new ArrayList<>();
+    try (Cursor c =
+        getReadableDatabase()
+            .rawQuery(
+                "SELECT id,url,user FROM sources WHERE url LIKE 'http://%' OR url LIKE 'https://%' ORDER BY id",
+                null)) {
+      while (c.moveToNext())
+        out.add(
+            new Source(
+                c.getLong(0),
+                c.getString(1) == null ? "" : c.getString(1),
+                c.getString(2) == null ? "" : c.getString(2)));
+    }
+    return out;
+  }
+
+  Source source(long id) {
+    try (Cursor c =
+        getReadableDatabase()
+            .rawQuery("SELECT id,url,user FROM sources WHERE id=?", new String[] {"" + id})) {
+      if (!c.moveToFirst()) return null;
+      return new Source(
+          c.getLong(0),
+          c.getString(1) == null ? "" : c.getString(1),
+          c.getString(2) == null ? "" : c.getString(2));
+    }
+  }
+
+  int sourceBookCount(long id) {
+    try (Cursor c =
+        getReadableDatabase()
+            .rawQuery(
+                "SELECT count(*) FROM books WHERE source=? AND missing=0 AND bundle=0",
+                new String[] {"" + id})) {
+      return c.moveToFirst() ? c.getInt(0) : 0;
+    }
+  }
+
+  void updateSourceAuth(long id, String user, String password) throws Exception {
+    exec("UPDATE sources SET user=?,secret=? WHERE id=?", user, encrypt(password), id);
+    reconnect(id);
+  }
+
+  /** 원격·로컬 폴더 연결 해제: 해당 소스의 책·북마크·표지·캐시를 정리하고 소스 레코드를 지운다. */
+  void removeSource(long id) {
+    List<String> bookIds = strings("SELECT id FROM books WHERE source=?", "" + id);
+    List<String> bookUrls = strings("SELECT url FROM books WHERE source=?", "" + id);
+    SQLiteDatabase database = getWritableDatabase();
+    database.beginTransactionNonExclusive();
+    try {
+      database.execSQL("DELETE FROM marks WHERE book IN (SELECT id FROM books WHERE source=?)", new Object[] {id});
+      database.execSQL("DELETE FROM books WHERE source=?", new Object[] {id});
+      database.execSQL("DELETE FROM sources WHERE id=?", new Object[] {id});
+      database.setTransactionSuccessful();
+    } finally {
+      database.endTransaction();
+    }
+    reconnect(id);
+    for (String bid : bookIds) coverFile(Long.parseLong(bid)).delete();
+    Set<String> cacheFiles = new HashSet<>();
+    for (String u : bookUrls) if (WebDav.isUrl(u)) cacheFiles.add(RemoteBooks.fileName(u));
+    if (!cacheFiles.isEmpty()) RemoteBooks.deleteAll(ctx, cacheFiles);
+  }
+
   long register(String url, String user, String password) throws Exception {
     String secret = encrypt(password);
     exec("INSERT OR IGNORE INTO sources(url,user,secret) VALUES(?,?,?)", url, user, secret);

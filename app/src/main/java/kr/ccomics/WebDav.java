@@ -14,8 +14,10 @@ import java.util.concurrent.TimeUnit;
 import okhttp3.*;
 import org.xmlpull.v1.XmlPullParser;
 
-/** PC 원격 폴더(WebDAV over HTTPS, 예: rclone serve webdav + Tailscale Funnel) 목록 읽기와 부분 읽기. */
+/** 원격 폴더(WebDAV over HTTPS — PC 서버·PikPak 등) 목록 읽기와 부분 읽기. */
 final class WebDav {
+  static final String PIKPAK_DEFAULT_URL = "https://dav.pikpak.ai/";
+
   static final OkHttpClient CLIENT =
       new OkHttpClient.Builder()
           .connectTimeout(12, TimeUnit.SECONDS)
@@ -24,11 +26,50 @@ final class WebDav {
           .build();
 
   static boolean isUrl(String url) {
-    return url.startsWith("https://") || url.startsWith("http://");
+    return url != null && (url.startsWith("https://") || url.startsWith("http://"));
+  }
+
+  static boolean isPikPak(String url) {
+    if (!isUrl(url)) return false;
+    HttpUrl u = HttpUrl.parse(url);
+    if (u == null) return false;
+    String h = u.host().toLowerCase(Locale.ROOT);
+    return h.equals("dav.pikpak.ai")
+        || h.endsWith(".pikpak.ai")
+        || h.equals("dav.mypikpak.com")
+        || h.endsWith(".mypikpak.com")
+        || h.equals("dav.pikpakdrive.com")
+        || h.endsWith(".pikpakdrive.com");
+  }
+
+  /** 원격 폴더 주소를 사용자에게 읽기 쉬운 이름으로 요약한다. */
+  static String displayName(String url) {
+    if (!isUrl(url)) return url == null ? "" : url;
+    HttpUrl u = HttpUrl.parse(url);
+    if (u == null) return url;
+    List<String> segs = new ArrayList<>();
+    for (String s : u.pathSegments()) if (!s.isEmpty()) segs.add(s);
+    if (isPikPak(url)) {
+      if (segs.isEmpty()) return "PikPak · 최상위";
+      return "PikPak · /" + String.join("/", segs);
+    }
+    String path = segs.isEmpty() ? "" : "/" + String.join("/", segs);
+    return "PC 원격 · " + u.host() + path;
+  }
+
+  /** 주소 입력을 https://…/ 형식으로 정규화한다. 스킴이 없으면 https://를 붙인다. */
+  static HttpUrl parseEndpoint(String raw) {
+    if (raw == null) return null;
+    String s = raw.trim();
+    if (s.isEmpty()) return null;
+    if (!s.contains("://")) s = "https://" + s;
+    HttpUrl u = HttpUrl.parse(s);
+    if (u == null || !u.isHttps()) return null;
+    return u;
   }
 
   static String auth(String user, String pass) {
-    return user.isEmpty() ? "" : Credentials.basic(user, pass, StandardCharsets.UTF_8);
+    return user == null || user.isEmpty() ? "" : Credentials.basic(user, pass == null ? "" : pass, StandardCharsets.UTF_8);
   }
 
   static final class Entry {
@@ -40,22 +81,51 @@ final class WebDav {
   private static final MediaType XML = MediaType.get("application/xml; charset=utf-8");
   private static final String PROPFIND =
       "<?xml version=\"1.0\" encoding=\"utf-8\"?><D:propfind xmlns:D=\"DAV:\"><D:prop>"
-          + "<D:resourcetype/><D:getcontentlength/><D:getlastmodified/></D:prop></D:propfind>";
+          + "<D:resourcetype/><D:getcontentlength/><D:getlastmodified/><D:displayname/></D:prop></D:propfind>";
 
-  /** 폴더 바로 아래 항목을 돌려준다(폴더 자신은 뺀다). */
+  /** 폴더 바로 아래 항목을 돌려준다(폴더 자신은 뺀다). 429/일시 오류는 짧게 재시도한다. */
   static List<Entry> list(String dirUrl, String auth) throws IOException {
     HttpUrl base = HttpUrl.get(dirUrl.endsWith("/") ? dirUrl : dirUrl + "/");
-    Request.Builder req =
-        new Request.Builder()
-            .url(base)
-            .header("Depth", "1")
-            .method("PROPFIND", RequestBody.create(PROPFIND, XML));
-    if (!auth.isEmpty()) req.header("Authorization", auth);
-    try (Response res = call(req.build())) {
-      if (res.code() != 207 && res.code() != 200) throw fail(res.code());
-      ResponseBody body = res.body();
-      if (body == null) throw new IOException("PC 서버가 빈 응답을 보냈습니다.");
-      return parse(base, body.byteStream());
+    for (int attempt = 0; attempt < 3; attempt++) {
+      Request.Builder req =
+          new Request.Builder()
+              .url(base)
+              .header("Depth", "1")
+              .method("PROPFIND", RequestBody.create(PROPFIND, XML));
+      if (!auth.isEmpty()) req.header("Authorization", auth);
+      try (Response res = call(req.build())) {
+        if ((res.code() == 429 || res.code() == 503) && attempt < 2) {
+          sleepRetry(res, attempt);
+          continue;
+        }
+        if (res.code() != 207 && res.code() != 200) throw fail(res.code(), dirUrl);
+        ResponseBody body = res.body();
+        if (body == null) throw new IOException(targetName(dirUrl) + "가 빈 응답을 보냈습니다.");
+        return parse(base, body.byteStream());
+      }
+    }
+    throw fail(429, dirUrl);
+  }
+
+  static long retryDelayMs(Response res, int attempt) {
+    if (res != null) {
+      String ra = res.header("Retry-After");
+      if (ra != null) {
+        try {
+          long sec = Long.parseLong(ra.trim());
+          if (sec > 0) return Math.min(8000L, sec * 1000L);
+        } catch (NumberFormatException ignored) {
+        }
+      }
+    }
+    return Math.min(6000L, 1200L * (attempt + 1));
+  }
+
+  private static void sleepRetry(Response res, int attempt) throws InterruptedIOException {
+    try {
+      Thread.sleep(retryDelayMs(res, attempt));
+    } catch (InterruptedException e) {
+      throw new InterruptedIOException();
     }
   }
 
@@ -66,21 +136,34 @@ final class WebDav {
       p.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true);
       p.setInput(in, "UTF-8");
       Entry cur = null;
-      String text = null;
+      String displayName = null;
+      StringBuilder text = null;
       for (int ev = p.getEventType(); ev != XmlPullParser.END_DOCUMENT; ev = p.next()) {
         if (ev == XmlPullParser.START_TAG) {
           String n = p.getName();
-          if ("response".equals(n)) cur = new Entry();
-          else if ("collection".equals(n) && cur != null) cur.dir = true;
-          text = null;
+          if ("response".equals(n)) {
+            cur = new Entry();
+            displayName = null;
+          } else if ("collection".equals(n) && cur != null) cur.dir = true;
+          text = new StringBuilder();
         } else if (ev == XmlPullParser.TEXT) {
-          text = p.getText();
+          if (text != null) text.append(p.getText());
         } else if (ev == XmlPullParser.END_TAG && cur != null) {
           String n = p.getName();
-          String v = text == null ? "" : text.trim();
+          String v = text == null ? "" : text.toString().trim();
           if ("href".equals(n)) {
             HttpUrl u = base.resolve(v);
-            if (u != null) cur.url = u.toString();
+            if (u != null) {
+              // TLS 종단 프록시가 href에 http://를 돌려줘도 원래 HTTPS 같은 호스트면 https로 맞춘다.
+              if (base.isHttps()
+                  && !u.isHttps()
+                  && u.host().equalsIgnoreCase(base.host())) {
+                HttpUrl.Builder b = u.newBuilder().scheme("https");
+                if (u.port() == 80) b.port(443);
+                u = b.build();
+              }
+              cur.url = u.toString();
+            }
           } else if ("getcontentlength".equals(n)) {
             try {
               cur.size = Long.parseLong(v);
@@ -88,39 +171,67 @@ final class WebDav {
             }
           } else if ("getlastmodified".equals(n)) {
             cur.modified = httpDate(v);
+          } else if ("displayname".equals(n)) {
+            if (!v.isEmpty()) displayName = v;
           } else if ("response".equals(n)) {
             if (cur.url != null && !same(cur.url, base.toString())) {
               HttpUrl u = HttpUrl.get(cur.url);
               List<String> seg = u.pathSegments();
               String name = "";
               for (int i = seg.size() - 1; i >= 0 && name.isEmpty(); i--) name = seg.get(i);
+              if (name.isEmpty() && displayName != null) name = displayName;
               cur.name = name;
               if (!name.isEmpty() && !name.startsWith(".")) out.add(cur);
             }
             cur = null;
+            displayName = null;
           }
           text = null;
         }
       }
     } catch (org.xmlpull.v1.XmlPullParserException e) {
-      throw new IOException("PC 서버 목록 형식을 읽지 못했습니다.");
+      throw new IOException(targetName(base.toString()) + " 목록 형식을 읽지 못했습니다.");
     }
     return out;
   }
 
   private static boolean same(String a, String b) {
+    HttpUrl ua = HttpUrl.parse(a), ub = HttpUrl.parse(b);
+    if (ua != null && ub != null) {
+      if (!ua.host().equalsIgnoreCase(ub.host()) || ua.port() != ub.port()) return false;
+      return normalizedSegments(ua).equals(normalizedSegments(ub));
+    }
     return a.replaceAll("/+$", "").equals(b.replaceAll("/+$", ""));
   }
 
+  private static List<String> normalizedSegments(HttpUrl u) {
+    List<String> raw = u.pathSegments();
+    int end = raw.size();
+    while (end > 0 && raw.get(end - 1).isEmpty()) end--;
+    return raw.subList(0, end);
+  }
+
   private static long httpDate(String v) {
+    if (v == null || v.isEmpty()) return 0;
     try {
       SimpleDateFormat f = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US);
       f.setTimeZone(TimeZone.getTimeZone("GMT"));
       Date d = f.parse(v);
       return d == null ? 0 : d.getTime();
+    } catch (Exception ignored) {
+    }
+    try {
+      String norm = v.replaceFirst("\\.\\d+(Z|[+-]\\d\\d:?\\d\\d)$", "$1").replace("Z", "+0000");
+      SimpleDateFormat iso = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ", Locale.US);
+      Date d = iso.parse(norm);
+      return d == null ? 0 : d.getTime();
     } catch (Exception e) {
       return 0;
     }
+  }
+
+  private static String targetName(String url) {
+    return isPikPak(url) ? "PikPak 서버" : "PC 서버";
   }
 
   static Response call(Request req) throws IOException {
@@ -131,17 +242,38 @@ final class WebDav {
     try {
       return client.newCall(req).execute();
     } catch (UnknownHostException | ConnectException | SocketTimeoutException e) {
+      String url = req.url().toString();
+      if (isPikPak(url))
+        throw new IOException("PikPak 서버에 연결할 수 없습니다. 인터넷 연결과 서버 주소를 확인하세요.");
       throw new IOException("PC에 연결할 수 없습니다. PC 전원과 Ccomics PC 서버 실행을 확인하세요.");
     }
   }
 
   static IOException fail(int code) {
-    if (code == 401 || code == 403)
+    return fail(code, "");
+  }
+
+  static IOException fail(int code, String url) {
+    boolean pikpak = isPikPak(url);
+    if (code == 401 || code == 403) {
+      if (pikpak)
+        return new IOException(
+            "PikPak WebDAV 인증에 실패했습니다. 프리미엄 상태와 WebDAV 아이디·비밀번호를 확인하세요.");
       return new IOException("PC 서버 계정 또는 비밀번호가 맞지 않습니다.");
-    if (code == 404) return new FileNotFoundException("PC 폴더에서 파일을 찾을 수 없습니다.");
-    if (code == 502 || code == 503 || code == 504)
+    }
+    if (code == 404) {
+      if (pikpak) return new FileNotFoundException("PikPak 폴더에서 파일 또는 경로를 찾을 수 없습니다.");
+      return new FileNotFoundException("PC 폴더에서 파일을 찾을 수 없습니다.");
+    }
+    if (code == 429) {
+      if (pikpak) return new IOException("PikPak 요청이 잠시 제한되었습니다(429). 잠시 뒤 다시 시도하세요.");
+      return new IOException("서버 요청이 잠시 제한되었습니다(429). 잠시 뒤 다시 시도하세요.");
+    }
+    if (code == 502 || code == 503 || code == 504) {
+      if (pikpak) return new IOException("PikPak 서버가 일시적으로 응답하지 않습니다(" + code + "). 잠시 뒤 다시 시도하세요.");
       return new IOException("PC에 연결할 수 없습니다. PC 전원과 Ccomics PC 서버 실행을 확인하세요.");
-    return new IOException("PC 서버 응답 오류 (" + code + ")");
+    }
+    return new IOException(targetName(url) + " 응답 오류 (" + code + ")");
   }
 
   /**
@@ -224,23 +356,11 @@ final class WebDav {
       data = new File(dir, key + ".part");
       map = new File(dir, key + ".map");
       // 끝부분(ZIP 목차)을 먼저 받으며 전체 크기·수정 시각을 확인한다.
-      Request.Builder req =
-          new Request.Builder().url(url).header("Range", "bytes=-" + (4 * CHUNK));
-      if (!auth.isEmpty()) req.header("Authorization", auth);
-      byte[] tail;
-      long size;
-      String mark;
-      try (Response res = call(req.build())) {
-        if (res.code() != 206) throw fail(res.code() == 200 ? 416 : res.code());
-        String cr = res.header("Content-Range", "");
-        int slash = cr.lastIndexOf('/');
-        if (slash < 0) throw new IOException("PC 서버가 파일 크기를 알려 주지 않았습니다.");
-        size = Long.parseLong(cr.substring(slash + 1).trim());
-        mark = size + "|" + res.header("Last-Modified", "");
-        ResponseBody body = res.body();
-        if (body == null) throw new IOException("PC 서버가 빈 응답을 보냈습니다.");
-        tail = body.bytes();
-      }
+      // 일부 클라우드 WebDAV(예: PikPak)가 bytes=- 접미사 Range를 거부할 수 있어 HEAD/bytes=0-0 폴백을 둔다.
+      TailResult tr = fetchTail(url, auth);
+      byte[] tail = tr.tail;
+      long size = tr.size;
+      String mark = tr.mark;
       length = size;
       stamp = mark;
       chunks = (int) ((length + CHUNK - 1) / CHUNK);
@@ -268,6 +388,122 @@ final class WebDav {
       int first = (int) (tailStart / CHUNK);
       if ((long) first * CHUNK < tailStart) first++;
       for (int c = first; c < chunks; c++) have.set(c);
+    }
+
+    private static final class TailResult {
+      final byte[] tail;
+      final long size;
+      final String mark;
+
+      TailResult(byte[] tail, long size, String mark) {
+        this.tail = tail;
+        this.size = size;
+        this.mark = mark;
+      }
+    }
+
+    private static long parseContentRangeTotal(String cr) {
+      if (cr == null) return -1;
+      int slash = cr.lastIndexOf('/');
+      if (slash < 0) return -1;
+      try {
+        long v = Long.parseLong(cr.substring(slash + 1).trim());
+        return v > 0 ? v : -1;
+      } catch (NumberFormatException e) {
+        return -1;
+      }
+    }
+
+    private static TailResult fetchTail(String url, String auth) throws IOException {
+      long tailSpan = 4L * CHUNK;
+      // 1) 1회 왕복으로 끝부분을 바로 요청(bytes=-N).
+      for (int attempt = 0; attempt < 3; attempt++) {
+        Request.Builder req =
+            new Request.Builder().url(url).header("Range", "bytes=-" + tailSpan);
+        if (!auth.isEmpty()) req.header("Authorization", auth);
+        try (Response res = call(req.build())) {
+          if ((res.code() == 429 || res.code() == 503) && attempt < 2) {
+            sleepRetry(res, attempt);
+            continue;
+          }
+          if (res.code() == 206) {
+            long total = parseContentRangeTotal(res.header("Content-Range", ""));
+            if (total > 0) {
+              ResponseBody body = res.body();
+              if (body == null) throw new IOException(targetName(url) + "가 빈 응답을 보냈습니다.");
+              byte[] tail = body.bytes();
+              return new TailResult(tail, total, total + "|" + res.header("Last-Modified", ""));
+            }
+          }
+          if (res.code() == 200) {
+            long cl = res.body() != null ? res.body().contentLength() : -1;
+            if (cl > 0 && cl <= tailSpan) {
+              byte[] all = res.body().bytes();
+              return new TailResult(
+                  all, all.length, all.length + "|" + res.header("Last-Modified", ""));
+            }
+          }
+          if (res.code() == 401 || res.code() == 403 || res.code() == 404)
+            throw fail(res.code(), url);
+          break; // 400/416/501/200(대용량) 등은 명시적 Range 폴백으로 처리
+        }
+      }
+      // 2) 폴백: HEAD 또는 bytes=0-0으로 전체 크기를 먼저 확인한 뒤 명시적 bytes=start-end 요청.
+      long total = -1;
+      String lastMod = "";
+      Request.Builder headReq = new Request.Builder().url(url).head();
+      if (!auth.isEmpty()) headReq.header("Authorization", auth);
+      try (Response res = call(headReq.build())) {
+        if (res.code() == 401 || res.code() == 403 || res.code() == 404)
+          throw fail(res.code(), url);
+        if (res.isSuccessful()) {
+          String cl = res.header("Content-Length", "");
+          try {
+            long v = Long.parseLong(cl.trim());
+            if (v > 0) total = v;
+          } catch (NumberFormatException ignored) {
+          }
+          lastMod = res.header("Last-Modified", "");
+        }
+      }
+      if (total <= 0) {
+        Request.Builder probe = new Request.Builder().url(url).header("Range", "bytes=0-0");
+        if (!auth.isEmpty()) probe.header("Authorization", auth);
+        try (Response res = call(probe.build())) {
+          if (res.code() == 206) {
+            total = parseContentRangeTotal(res.header("Content-Range", ""));
+            if (lastMod.isEmpty()) lastMod = res.header("Last-Modified", "");
+          } else if (res.code() == 200 && res.body() != null && res.body().contentLength() > 0) {
+            total = res.body().contentLength();
+            if (lastMod.isEmpty()) lastMod = res.header("Last-Modified", "");
+          } else {
+            throw fail(res.code() == 200 ? 416 : res.code(), url);
+          }
+        }
+      }
+      if (total <= 0) throw new IOException(targetName(url) + "가 파일 크기를 알려 주지 않았습니다.");
+      long tailStart = Math.max(0L, total - tailSpan);
+      for (int attempt = 0; attempt < 3; attempt++) {
+        Request.Builder req =
+            new Request.Builder()
+                .url(url)
+                .header("Range", "bytes=" + tailStart + "-" + (total - 1));
+        if (!auth.isEmpty()) req.header("Authorization", auth);
+        try (Response res = call(req.build())) {
+          if ((res.code() == 429 || res.code() == 503) && attempt < 2) {
+            sleepRetry(res, attempt);
+            continue;
+          }
+          if (res.code() != 206 && !(res.code() == 200 && tailStart == 0))
+            throw fail(res.code() == 200 ? 416 : res.code(), url);
+          ResponseBody body = res.body();
+          if (body == null) throw new IOException(targetName(url) + "가 빈 응답을 보냈습니다.");
+          byte[] tail = body.bytes();
+          if (lastMod.isEmpty()) lastMod = res.header("Last-Modified", "");
+          return new TailResult(tail, total, total + "|" + lastMod);
+        }
+      }
+      throw fail(429, url);
     }
 
     long chunkEnd(int c) {
@@ -387,9 +623,9 @@ final class WebDav {
           call = current;
         }
         try (Response res = current.execute()) {
-          if (res.code() != 206) throw fail(res.code() == 200 ? 416 : res.code());
+          if (res.code() != 206) throw fail(res.code() == 200 ? 416 : res.code(), url);
           ResponseBody body = res.body();
-          if (body == null) throw new IOException("PC 서버가 빈 응답을 보냈습니다.");
+          if (body == null) throw new IOException(targetName(url) + "가 빈 응답을 보냈습니다.");
           InputStream in = body.byteStream();
           byte[] buf = new byte[CHUNK];
           for (int c = start; c <= end; c++) {
@@ -413,14 +649,19 @@ final class WebDav {
           }
         } catch (IOException e) {
           if (closed) continue;
-          boolean auth = e.getMessage() != null && e.getMessage().contains("비밀번호");
-          if (++failures >= 4 || auth) {
+          boolean authFail = e.getMessage() != null && e.getMessage().contains("비밀번호");
+          boolean rateLimited = e.getMessage() != null && e.getMessage().contains("(429)");
+          int maxFail = rateLimited ? 6 : 4;
+          if (++failures >= maxFail || authFail) {
             synchronized (this) {
               error =
                   e instanceof UnknownHostException
                           || e instanceof ConnectException
                           || e instanceof SocketTimeoutException
-                      ? new IOException("PC에 연결할 수 없습니다. PC 전원과 Ccomics PC 서버 실행을 확인하세요.")
+                      ? new IOException(
+                          isPikPak(url)
+                              ? "PikPak 서버에 연결할 수 없습니다. 인터넷 연결과 서버 주소를 확인하세요."
+                              : "PC에 연결할 수 없습니다. PC 전원과 Ccomics PC 서버 실행을 확인하세요.")
                       : e;
               worker = null;
               if (!closed) save();
@@ -429,7 +670,7 @@ final class WebDav {
             }
           }
           try {
-            Thread.sleep(700L * failures);
+            Thread.sleep((rateLimited ? 1500L : 700L) * failures);
           } catch (InterruptedException ignored) {
           }
         }

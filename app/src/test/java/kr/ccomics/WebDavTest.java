@@ -141,4 +141,111 @@ public class WebDavTest {
         Order.resolveFolderSeries("https://pc.ts.net/ccomics/%EB%A7%88%EC%99%95%EC%84%B1%20%EC%9A%94%EB%A6%AC%EC%82%AC/"));
     assertEquals("1권", Order.volumeLabel("마왕성 요리사 1권 [원본] [1512px]", ""));
   }
+
+  @Test
+  public void pikpakEndpointDisplayAndErrors() {
+    assertTrue(WebDav.isPikPak("https://dav.pikpak.ai/"));
+    assertTrue(WebDav.isPikPak("https://dav.mypikpak.com/Comics/"));
+    assertFalse(WebDav.isPikPak("https://pc.ts.net/ccomics/"));
+
+    okhttp3.HttpUrl parsed = WebDav.parseEndpoint("dav.pikpak.ai");
+    assertNotNull(parsed);
+    assertEquals("https://dav.pikpak.ai/", parsed.toString());
+    assertNull(WebDav.parseEndpoint("http://dav.pikpak.ai/"));
+
+    assertEquals("PikPak · 최상위", WebDav.displayName("https://dav.pikpak.ai/"));
+    assertEquals(
+        "PikPak · /만화/신작",
+        WebDav.displayName("https://dav.pikpak.ai/%EB%A7%8C%ED%99%94/%EC%8B%A0%EC%9E%91/"));
+
+    IOException authErr = WebDav.fail(403, "https://dav.pikpak.ai/");
+    assertTrue(authErr.getMessage().contains("PikPak"));
+    assertTrue(authErr.getMessage().contains("프리미엄"));
+    assertTrue(authErr.getMessage().contains("비밀번호"));
+    assertTrue(WebDav.fail(429, "https://dav.pikpak.ai/").getMessage().contains("429"));
+  }
+
+  @Test
+  public void handlesLowercaseHrefSuffixRangeFallbackRedirectAnd429() throws Exception {
+    ByteArrayOutputStream sink = new ByteArrayOutputStream();
+    Random rnd = new Random(9);
+    try (ZipArchiveOutputStream zip = new ZipArchiveOutputStream(sink)) {
+      for (int i = 1; i <= 3; i++) {
+        byte[] data = new byte[400_000];
+        rnd.nextBytes(data);
+        data[0] = (byte) (i + 10);
+        BundleTest.put(zip, String.format("%03d.jpg", i), data, true);
+      }
+    }
+    byte[] bytes = sink.toByteArray();
+    String auth = WebDav.auth("pikuser", "pikpass");
+    java.util.concurrent.atomic.AtomicInteger propfindCalls =
+        new java.util.concurrent.atomic.AtomicInteger();
+    MockWebServer s = new MockWebServer();
+    s.setDispatcher(
+        new Dispatcher() {
+          public MockResponse dispatch(RecordedRequest r) {
+            String path = r.getPath();
+            if (path.startsWith("/cdn/")) {
+              // 리디렉션된 CDN은 명시적 Range만 허용하고 suffix Range(bytes=-)는 400 거부.
+              if ("HEAD".equals(r.getMethod())) {
+                return new MockResponse()
+                    .setResponseCode(200)
+                    .setHeader("Content-Length", bytes.length);
+              }
+              String range = r.getHeader("Range");
+              Matcher m = Pattern.compile("bytes=([0-9]+)-([0-9]+)").matcher(range == null ? "" : range);
+              if (!m.matches()) return new MockResponse().setResponseCode(400);
+              long start = Long.parseLong(m.group(1));
+              long end = Math.min(bytes.length - 1, Long.parseLong(m.group(2)));
+              return new MockResponse()
+                  .setResponseCode(206)
+                  .setHeader("Content-Range", "bytes " + start + "-" + end + "/" + bytes.length)
+                  .setBody(new Buffer().write(Arrays.copyOfRange(bytes, (int) start, (int) end + 1)));
+            }
+            if (!auth.equals(r.getHeader("Authorization")))
+              return new MockResponse().setResponseCode(401);
+            if ("PROPFIND".equals(r.getMethod())) {
+              if (propfindCalls.incrementAndGet() == 1) {
+                return new MockResponse().setResponseCode(429).setHeader("Retry-After", "1");
+              }
+              // 소문자 퍼센트 인코딩으로 자기 자신 경로를 돌려줘도 중복 포함하지 않아야 한다.
+              String xml =
+                  "<d:response><d:href>/%eb%a7%8c%ed%99%94</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>"
+                      + "<d:response><d:href>/%eb%a7%8c%ed%99%94/book1.zip</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>"
+                      + bytes.length
+                      + "</d:getcontentlength><d:getlastmodified>2026-11-27T08:00:00Z</d:getlastmodified></d:prop></d:propstat></d:response>";
+              return new MockResponse()
+                  .setResponseCode(207)
+                  .setBody("<?xml version=\"1.0\"?><d:multistatus xmlns:d=\"DAV:\">" + xml + "</d:multistatus>");
+            }
+            if ("HEAD".equals(r.getMethod())) {
+              return new MockResponse().setResponseCode(302).setHeader("Location", "/cdn/book1.zip");
+            }
+            // GET도 CDN으로 302 리디렉션
+            return new MockResponse().setResponseCode(302).setHeader("Location", "/cdn/book1.zip");
+          }
+        });
+    s.start();
+    try {
+      String dir = s.url("/%EB%A7%8C%ED%99%94/").toString();
+      List<WebDav.Entry> entries = WebDav.list(dir, auth);
+      assertEquals(2, propfindCalls.get());
+      assertEquals(1, entries.size());
+      assertEquals("book1.zip", entries.get(0).name);
+      assertTrue(entries.get(0).modified > 0);
+
+      Context ctx = RuntimeEnvironment.getApplication();
+      try (Archive a = new Archive(ctx, entries.get(0).url, null, auth)) {
+        assertEquals(3, a.pages.size());
+        for (int i = 0; i < 3; i++) {
+          try (InputStream in = a.zip.getInputStream(a.pages.get(i))) {
+            assertEquals(i + 11, in.read());
+          }
+        }
+      }
+    } finally {
+      s.shutdown();
+    }
+  }
 }
