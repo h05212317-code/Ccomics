@@ -30,6 +30,7 @@ public final class Main extends Activity {
   static final int THUMB_MIN_DP = 76, THUMB_MAX_DP = 220, THUMB_DEFAULT_DP = 133;
   static final int SORT_TITLE = 0, SORT_RECENT = 1, SORT_ADDED = 2, SORT_CUSTOM = 3;
   static final int REMOTE_NONE = 0, REMOTE_CLOUD = 1, REMOTE_CACHED = 2;
+  static final int SETTINGS_NONE = 0, SETTINGS_LIBRARY = 1, SETTINGS_REMOTE = 2, SETTINGS_READER = 3;
   static final String[] SORT_NAMES = {"제목순", "최근 읽은순", "최근 추가순", "사용자 정의"};
   AppUpdates updates;
   Library db;
@@ -65,6 +66,10 @@ public final class Main extends Activity {
   Runnable pendingThumbResize;
   ShelfDragController dragController;
   TouchZoneOverlay touchZoneOverlay;
+  SettingsUi settingsUi;
+  View settingsOverlay;
+  int settingsPage = SETTINGS_NONE;
+  boolean settingsDirty;
   String selected = "", shelf = "", query = "", scanMessage = "";
   int filter, gridIndex, gridOffset, volumeIndex, volumeOffset;
   volatile int requestId;
@@ -237,7 +242,7 @@ public final class Main extends Activity {
   @Override
   public void onWindowFocusChanged(boolean hasFocus) {
     super.onWindowFocusChanged(hasFocus);
-    if (hasFocus && reader != null && overlay == null) immersive();
+    if (hasFocus && reader != null && overlay == null && settingsPage == SETTINGS_NONE) immersive();
   }
 
   @Override
@@ -260,7 +265,8 @@ public final class Main extends Activity {
   public void onConfigurationChanged(Configuration c) {
     super.onConfigurationChanged(c);
     if (reader == null) renderNow(true);
-    else
+    else {
+      if (settingsPage == SETTINGS_READER) refreshSettingsView();
       reader.post(
           () -> {
             if (reader != null) {
@@ -268,6 +274,7 @@ public final class Main extends Activity {
               readerStatus();
             }
           });
+    }
   }
 
   int dp(float n) {
@@ -1708,6 +1715,8 @@ public final class Main extends Activity {
   }
 
   void renderLibrary() {
+    int savedSettingsScroll = currentSettingsScrollY();
+    settingsOverlay = null;
     if (dragController != null) {
       dragController.cancel();
       dragController = null;
@@ -1868,6 +1877,9 @@ public final class Main extends Activity {
     floatingResumeVisible = false;
     if (selected.isEmpty()) libraryPane(pane, body);
     else detailPane(pane);
+    if (settingsPage == SETTINGS_LIBRARY || settingsPage == SETTINGS_REMOTE) {
+      showSettingsPage(settingsPage, savedSettingsScroll);
+    }
   }
 
   void searchLibrary() {
@@ -3417,6 +3429,7 @@ public final class Main extends Activity {
                       runOnUiThread(
                           () -> {
                             setSourceMode(id, SOURCE_ON);
+                            closeSettings();
                             scan(Collections.singletonList(id));
                           });
                     } catch (Exception ex) {
@@ -3650,6 +3663,7 @@ public final class Main extends Activity {
                 long sid = db.register(target, user, pass);
                 db.reconnect(sid);
                 setSourceMode(sid, SOURCE_ON);
+                closeSettings();
                 toast(WebDav.displayName(target) + " 연결을 시작합니다.");
                 scan(Collections.singletonList(sid));
               } catch (Exception ex) {
@@ -3660,101 +3674,100 @@ public final class Main extends Activity {
         .show();
   }
 
-  /** 연결된 원격 폴더(PC · PikPak)를 폴더별로 켜기/보관본만/숨김, 비밀번호 수정, 연결 해제한다. */
-  void remoteSourcesDialog() {
-    List<Library.Source> list = db.remoteSources();
-    if (list.isEmpty()) {
-      dialog()
-          .setTitle("원격 폴더 관리")
-          .setMessage("연결된 PC 원격 폴더나 PikPak 폴더가 없습니다.")
-          .setPositiveButton("PikPak 연결", (d, w) -> pikpak())
-          .setNeutralButton("PC 원격 연결", (d, w) -> remote())
-          .setNegativeButton("닫기", null)
-          .show();
-      return;
+  SettingsUi settingsUi() {
+    if (settingsUi == null) settingsUi = new SettingsUi(this);
+    return settingsUi;
+  }
+
+  int currentSettingsScrollY() {
+    if (settingsOverlay == null) return 0;
+    View sc = settingsOverlay.findViewWithTag("settings_scroll");
+    return sc instanceof ScrollView ? sc.getScrollY() : 0;
+  }
+
+  void showSettingsPage(int page, int scrollY) {
+    if (isDestroyed() || frame == null) return;
+    if (settingsOverlay != null) {
+      frame.removeView(settingsOverlay);
+      settingsOverlay = null;
     }
-    String[] rows = new String[list.size()];
-    for (int i = 0; i < list.size(); i++) {
-      Library.Source s = list.get(i);
-      int mode = sourceMode(s.id, s.url);
-      int count = db.sourceBookCount(s.id);
-      rows[i] = WebDav.displayName(s.url) + "\n" + sourceModeLabel(mode) + "  ·  " + count + "권";
+    settingsPage = page;
+    if (page == SETTINGS_NONE) return;
+    if (page == SETTINGS_READER) {
+      if (reader == null) {
+        settingsPage = SETTINGS_NONE;
+        return;
+      }
+      if (overlay != null) toggleReaderMenu();
+      theme();
     }
+    View view;
+    if (page == SETTINGS_REMOTE) view = settingsUi().buildRemoteSourcesSettings(scrollY);
+    else if (page == SETTINGS_READER) view = settingsUi().buildReaderSettings(scrollY);
+    else view = settingsUi().buildLibrarySettings(scrollY);
+    settingsOverlay = view;
+    frame.addView(view, new FrameLayout.LayoutParams(-1, -1));
+  }
+
+  void refreshSettingsView() {
+    if (settingsPage != SETTINGS_NONE) showSettingsPage(settingsPage, currentSettingsScrollY());
+  }
+
+  void openRemoteSourcesSettings() {
+    showSettingsPage(SETTINGS_REMOTE, 0);
+  }
+
+  void backFromRemoteSources() {
+    showSettingsPage(SETTINGS_LIBRARY, 0);
+  }
+
+  void closeSettings() {
+    boolean wasReader = settingsPage == SETTINGS_READER;
+    boolean dirty = settingsDirty;
+    settingsDirty = false;
+    if (settingsOverlay != null && frame != null) {
+      frame.removeView(settingsOverlay);
+    }
+    settingsOverlay = null;
+    settingsPage = SETTINGS_NONE;
+    if (wasReader) {
+      if (reader != null && overlay == null) immersive();
+    } else if (dirty && reader == null) {
+      library(true);
+    }
+  }
+
+  void confirmRemoveSource(Library.Source src) {
     dialog()
-        .setTitle("원격 폴더 관리")
-        .setItems(rows, (d, i) -> remoteSourceActions(list.get(i)))
-        .setPositiveButton("PikPak 추가", (d, w) -> pikpak())
-        .setNeutralButton("PC 원격 추가", (d, w) -> remote())
-        .setNegativeButton("닫기", null)
+        .setTitle("원격 폴더 연결 해제")
+        .setMessage(
+            WebDav.displayName(src.url)
+                + " 연결을 해제하고 서재 목록 및 보관본을 정리합니다.\n원본 파일("
+                + (WebDav.isPikPak(src.url) ? "PikPak" : "PC")
+                + ")은 지워지지 않습니다.")
+        .setPositiveButton(
+            "연결 해제",
+            (d, w) -> {
+              if (loadingBook) abortActiveDownload();
+              worker.execute(
+                  () -> {
+                    db.removeSource(src.id);
+                    prefs.edit().remove("sourceMode-" + src.id).apply();
+                    runOnUiThread(
+                        () -> {
+                          if (isDestroyed()) return;
+                          selected = "";
+                          library(false);
+                          toast("원격 폴더 연결을 해제했습니다.");
+                        });
+                  });
+            })
+        .setNegativeButton("취소", null)
         .show();
   }
 
-  void remoteSourceActions(Library.Source src) {
-    int mode = sourceMode(src.id, src.url);
-    String[] items = {
-      (mode == SOURCE_ON ? "✓ " : "") + "켜짐 (전체 표시 · 새로고침 연결)",
-      (mode == SOURCE_CACHED_ONLY ? "✓ " : "") + "보관본만 보기 (오프라인 · 연결 안 함)",
-      (mode == SOURCE_HIDDEN ? "✓ " : "") + "숨김 (책 숨김 · 연결 안 함)",
-      "이 폴더만 다시 읽기",
-      "계정 · 비밀번호 수정",
-      "연결 해제"
-    };
-    choices(
-        WebDav.displayName(src.url),
-        items,
-        i -> {
-          if (i >= 0 && i <= 2) {
-            setSourceMode(src.id, i);
-            selected = "";
-            library(true);
-            if (i == SOURCE_ON) {
-              toast("전체 책을 표시하고 새로고침 시 연결합니다.");
-              scan(Collections.singletonList(src.id));
-            } else if (i == SOURCE_CACHED_ONLY) {
-              toast("미리 받아 둔 보관본만 표시하고 서버에 연결하지 않습니다.");
-            } else {
-              toast("이 폴더의 책을 숨기고 서버에 연결하지 않습니다.");
-            }
-            return;
-          }
-          if (i == 3) {
-            if (mode != SOURCE_ON) setSourceMode(src.id, SOURCE_ON);
-            scan(Collections.singletonList(src.id));
-            return;
-          }
-          if (i == 4) {
-            editSourceAuthDialog(src);
-            return;
-          }
-          if (i == 5) {
-            dialog()
-                .setTitle("원격 폴더 연결 해제")
-                .setMessage(
-                    WebDav.displayName(src.url)
-                        + " 연결을 해제하고 서재 목록 및 보관본을 정리합니다.\n원본 파일("
-                        + (WebDav.isPikPak(src.url) ? "PikPak" : "PC")
-                        + ")은 지워지지 않습니다.")
-                .setPositiveButton(
-                    "연결 해제",
-                    (d, w) -> {
-                      if (loadingBook) abortActiveDownload();
-                      worker.execute(
-                          () -> {
-                            db.removeSource(src.id);
-                            prefs.edit().remove("sourceMode-" + src.id).apply();
-                            runOnUiThread(
-                                () -> {
-                                  if (isDestroyed()) return;
-                                  selected = "";
-                                  library(false);
-                                  toast("원격 폴더 연결을 해제했습니다.");
-                                });
-                          });
-                    })
-                .setNegativeButton("취소", null)
-                .show();
-          }
-        });
+  void remoteSourcesDialog() {
+    openRemoteSourcesSettings();
   }
 
   void editSourceAuthDialog(Library.Source src) {
@@ -3879,80 +3892,7 @@ public final class Main extends Activity {
   }
 
   void settings() {
-    long[] remoteUsage = RemoteBooks.usage(this);
-    String remoteStorageLabel =
-        remoteUsage[1] > 0
-            ? "원격 보관함 관리 · " + RemoteBooks.formatSize(remoteUsage[1])
-            : "원격 보관함 관리";
-    List<Library.Source> remoteSrcs = db.remoteSources();
-    int activeRemote = 0;
-    for (Library.Source s : remoteSrcs)
-      if (sourceMode(s.id, s.url) == SOURCE_ON) activeRemote++;
-    String remoteManageLabel =
-        remoteSrcs.isEmpty()
-            ? "원격 폴더 관리 · 없음"
-            : "원격 폴더 관리 · " + activeRemote + "/" + remoteSrcs.size() + " 켜짐";
-    choices(
-        "서재 설정",
-        new String[] {
-          "연결 폴더 다시 읽기",
-          "책장 관리",
-          "표지 크기 · " + coverWidthDp() + "dp",
-          "별점순 표시하기 · " + (groupByRating() ? "켜짐" : "꺼짐"),
-          "이어 읽기 플로팅 · " + (showFloatingResume() ? "켜짐" : "꺼짐"),
-          "화면 테마",
-          "임시 파일 정리",
-          "앱 업데이트 확인",
-          "책 이름만 표시 · " + (prefs.getBoolean("hideVolumeTags", true) ? "켜짐" : "꺼짐"),
-          "작품 수 표시 · " + (showShelfCount() ? "켜짐" : "꺼짐"),
-          remoteManageLabel,
-          remoteStorageLabel
-        },
-        i -> {
-          if (i == 0) refreshSources(false);
-          if (i == 1) shelves();
-          if (i == 2) showThumbSizeSlider();
-          if (i == 3) {
-            boolean next = !groupByRating();
-            prefs.edit().putBoolean("groupByRating", next).apply();
-            gridIndex = gridOffset = 0;
-            renderNow(false);
-            toast(next ? "별점순으로 구분해 표시합니다." : "별점 구분 없이 전체 목록으로 표시합니다.");
-          }
-          if (i == 4) {
-            boolean next = !showFloatingResume();
-            prefs.edit().putBoolean("showFloatingResume", next).apply();
-            resumeDismissed = false;
-            renderNow(true);
-            toast(next ? "이어 읽기 플로팅을 표시합니다." : "이어 읽기 플로팅을 숨깁니다.");
-          }
-          if (i == 5)
-            pick("화면 테마", "theme", new String[] {"기기 설정", "밝게", "어둡게"}, () -> renderNow(true));
-          if (i == 7) updates.check(true);
-          if (i == 8) {
-            boolean hide = !prefs.getBoolean("hideVolumeTags", true);
-            prefs.edit().putBoolean("hideVolumeTags", hide).apply();
-            renderNow(true);
-            toast(hide ? "앞뒤 [문구]와 파일 표기를 숨깁니다." : "파일 이름을 그대로 표시합니다.");
-          }
-          if (i == 9) {
-            boolean next = !showShelfCount();
-            prefs.edit().putBoolean("showShelfCount", next).apply();
-            renderNow(true);
-            toast(next ? "책장에 작품 수를 표시합니다." : "책장에서 작품 수를 숨깁니다.");
-          }
-          if (i == 11) remoteStorage();
-          if (i == 10) remoteSourcesDialog();
-          if (i == 6) {
-            worker.execute(
-                () -> {
-                  Archive.clearSpools(this);
-                  WebDav.Cache.clear(this);
-                  coverCache.evictAll();
-                  runOnUiThread(() -> toast("임시 파일을 정리했습니다."));
-                });
-          }
-        });
+    showSettingsPage(SETTINGS_LIBRARY, 0);
   }
 
   void toast(String s) {
@@ -4827,45 +4767,7 @@ public final class Main extends Activity {
   }
 
   void readerSettings() {
-    choices(
-        "읽기 설정",
-        new String[] {
-          "페이지 구성",
-          "읽기 방향   " + directionLabel(reader.rtl),
-          "넘김 효과",
-          "이미지 맞춤",
-          reader.solo ? "이 시리즈 첫 장 단독 표시  ✓" : "이 시리즈 첫 장 단독 표시",
-          "본문 배경색",
-          prefs.getBoolean("autoNext", true) ? "다음 권 자동 열기  ✓" : "다음 권 자동 열기",
-          "다음 권 읽기",
-          "터치 범위 설정   " + tapZoneSummary(),
-          "터치·제스처 설정"
-        },
-        i -> {
-          if (i == 0)
-            pick(
-                "페이지 구성",
-                "mode",
-                new String[] {"화면에 맞춰 자동", "한 쪽", "양면", "세로 연속"},
-                reader::optionsChanged);
-          if (i == 1) pickDirection();
-          if (i == 2) turnEffects();
-          if (i == 3)
-            pick("이미지 맞춤", "fit", new String[] {"화면 맞춤", "너비 맞춤", "높이 맞춤"}, reader::optionsChanged);
-          if (i == 4) {
-            prefs.edit().putBoolean(reader.firstPageKey(), !reader.solo).apply();
-            reader.optionsChanged();
-          }
-          if (i == 5)
-            pick("본문 배경색", "paper", new String[] {"먹색", "종이색", "흰색"}, reader::optionsChanged);
-          if (i == 6) {
-            prefs.edit().putBoolean("autoNext", !prefs.getBoolean("autoNext", true)).apply();
-            toast(prefs.getBoolean("autoNext", true) ? "다음 권을 자동으로 엽니다." : "다음 권을 열기 전에 확인합니다.");
-          }
-          if (i == 7) nextVolume();
-          if (i == 8) openTouchZoneEditor();
-          if (i == 9) gestureSettings();
-        });
+    showSettingsPage(SETTINGS_READER, 0);
   }
 
   void turnEffects() {
@@ -4981,6 +4883,7 @@ public final class Main extends Activity {
   }
 
   void leaveReader() {
+    closeSettings();
     closeTouchZoneEditor();
     cancelLoadingBook();
     String closedGrp = reader.book.grp;
@@ -5003,6 +4906,14 @@ public final class Main extends Activity {
   public void onBackPressed() {
     if (touchZoneOverlay != null) {
       closeTouchZoneEditor();
+      return;
+    }
+    if (settingsPage == SETTINGS_REMOTE) {
+      backFromRemoteSources();
+      return;
+    }
+    if (settingsPage != SETTINGS_NONE) {
+      closeSettings();
       return;
     }
     if (reader != null) {

@@ -94,6 +94,10 @@ final class ToolsIcon extends View {
         line(c, 7, 10, 12, 15);
         line(c, 12, 15, 17, 10);
         break;
+      case "chevron_right":
+        line(c, 9, 6, 15, 12);
+        line(c, 15, 12, 9, 18);
+        break;
       case "play":
         p.setStyle(Paint.Style.FILL);
         path.reset();
