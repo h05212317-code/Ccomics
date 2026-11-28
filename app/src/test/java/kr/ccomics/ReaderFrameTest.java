@@ -277,6 +277,25 @@ public class ReaderFrameTest {
     android.view.MotionEvent offPress = android.view.MotionEvent.obtain(0, 0, 0, 100f, 800f, 0);
     assertFalse(reader.handleLongPress(offPress));
     offPress.recycle();
+
+    // 실제 터치에서 미세 흔들림(12dp)이 있어도 450ms 뒤 정상 동작하고, 큰 스와이프(30dp)는 취소된다.
+    host.prefs.edit().putBoolean("longPressVolume", true).apply();
+    reader.readGestures();
+    long t = android.os.SystemClock.uptimeMillis();
+    android.view.MotionEvent down = android.view.MotionEvent.obtain(t, t, 0, 100f, 800f, 0);
+    reader.onTouchEvent(down);
+    down.recycle();
+    assertTrue(reader.edgeLongPressArmed);
+    android.view.MotionEvent wiggle =
+        android.view.MotionEvent.obtain(t, t + 100, 2, 100f + host.dp(12), 800f + host.dp(4), 0);
+    reader.onTouchEvent(wiggle);
+    wiggle.recycle();
+    assertTrue("slight thumb wiggle should not cancel edge long press", reader.edgeLongPressArmed);
+    android.view.MotionEvent bigMove =
+        android.view.MotionEvent.obtain(t, t + 150, 2, 100f + host.dp(30), 800f, 0);
+    reader.onTouchEvent(bigMove);
+    bigMove.recycle();
+    assertFalse("intentional swipe should cancel edge long press", reader.edgeLongPressArmed);
   }
 
   @Test

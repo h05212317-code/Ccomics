@@ -159,4 +159,52 @@ public class DownloadServiceTest {
       s.shutdown();
     }
   }
+
+  @Test
+  public void backgroundScanCompletesInForegroundServiceWithoutActivityListener() throws Exception {
+    android.graphics.Bitmap bmp =
+        android.graphics.Bitmap.createBitmap(16, 24, android.graphics.Bitmap.Config.ARGB_8888);
+    java.io.ByteArrayOutputStream png = new java.io.ByteArrayOutputStream();
+    bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, png);
+    bmp.recycle();
+    java.io.ByteArrayOutputStream sink = new java.io.ByteArrayOutputStream();
+    try (org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream zos =
+        new org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream(sink)) {
+      BundleTest.put(zos, "001.png", png.toByteArray(), true);
+    }
+    byte[] zipBytes = sink.toByteArray();
+    String auth = WebDav.auth("u", "p");
+    MockWebServer s = WebDavTest.server(zipBytes, auth);
+    Context ctx = RuntimeEnvironment.getApplication();
+    WebDav.Cache.clear(ctx);
+    DownloadService.setScanListener(null);
+    DownloadService.consumePendingScanRefresh();
+    try (Library lib = new Library(ctx)) {
+      String root = s.url("/ccomics/").toString();
+      lib.exec("INSERT INTO sources(id,url,user,secret) VALUES(1,?,'u','')", root);
+      lib.httpAuths.put(1L, auth);
+
+      List<Long> started = DownloadService.enqueueScan(ctx, lib, Collections.singletonList(1L));
+      assertEquals(1, started.size());
+
+      ServiceController<DownloadService> ctrl =
+          Robolectric.buildService(
+              DownloadService.class,
+              new Intent(ctx, DownloadService.class).setAction(DownloadService.ACTION_START));
+      ctrl.create().startCommand(0, 1);
+      assertNotNull(Shadows.shadowOf(ctrl.get()).getLastForegroundNotification());
+
+      long deadline = System.currentTimeMillis() + 10_000;
+      while (DownloadService.isScanning() && System.currentTimeMillis() < deadline) {
+        Thread.sleep(30);
+      }
+      assertFalse(DownloadService.isScanning());
+      assertTrue(DownloadService.consumePendingScanRefresh());
+      assertEquals(1, lib.books().size());
+      assertTrue(lib.coverFile(lib.books().get(0).id).isFile());
+      ctrl.destroy();
+    } finally {
+      s.shutdown();
+    }
+  }
 }

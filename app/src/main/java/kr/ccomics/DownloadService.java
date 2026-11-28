@@ -22,8 +22,10 @@ public final class DownloadService extends Service {
   static final String ACTION_CANCEL = "kr.ccomics.DOWNLOAD_CANCEL";
   static final int NOTIF_ID = 201;
   static final int DONE_NOTIF_ID = 202;
+  static final int SCAN_DONE_NOTIF_ID = 203;
 
   private static final ExecutorService EXECUTOR = Executors.newCachedThreadPool();
+  private static final ExecutorService SCAN_EXECUTOR = Executors.newSingleThreadExecutor();
   private static final AtomicInteger NEXT_ID = new AtomicInteger(1);
   private static final Object LOCK = new Object();
 
@@ -67,6 +69,14 @@ public final class DownloadService extends Service {
     void onDownloadCancelled(int sessionId);
   }
 
+  interface ScanListener {
+    void onScanChanged();
+
+    void onScanProgress(String bannerText);
+
+    void onScanFinished(List<Long> finishedIds, List<String> problems);
+  }
+
   static final class Session {
     final int id;
     final ArrayDeque<Target> queue = new ArrayDeque<>();
@@ -108,10 +118,143 @@ public final class DownloadService extends Service {
   private static volatile long pendingOpenBookId;
   private static volatile boolean pendingRefresh;
 
+  private static final Set<Long> scanningIds = new HashSet<>();
+  private static volatile ScanListener scanListener;
+  private static volatile boolean scanRunning;
+  private static volatile String scanBanner = "";
+  private static volatile String scanNotifText = "폴더 목록을 읽고 있습니다…";
+  private static volatile int scanDone, scanTotal;
+  private static volatile long lastScanNotifAt;
+  private static volatile boolean pendingScanRefresh;
+  private static volatile String pendingScanProblems = "";
+
   private PowerManager.WakeLock wakeLock;
 
   static void setListener(Listener l) {
     listener = l;
+  }
+
+  static void setScanListener(ScanListener l) {
+    scanListener = l;
+  }
+
+  static boolean isScanning() {
+    synchronized (LOCK) {
+      return scanRunning;
+    }
+  }
+
+  static Set<Long> activeScanIds() {
+    synchronized (LOCK) {
+      return new HashSet<>(scanningIds);
+    }
+  }
+
+  static String currentScanBanner() {
+    return scanRunning ? scanBanner : "";
+  }
+
+  static boolean consumePendingScanRefresh() {
+    boolean v = pendingScanRefresh;
+    pendingScanRefresh = false;
+    return v;
+  }
+
+  static String consumePendingScanProblems() {
+    String s = pendingScanProblems;
+    pendingScanProblems = "";
+    return s;
+  }
+
+  private static boolean isAnyWorkRunningLocked() {
+    return (active != null && active.running) || scanRunning;
+  }
+
+  /** 책과 표지 색인을 포그라운드 서비스에서 실행해 다른 앱 전환·화면 꺼짐 시에도 끝까지 완료한다. */
+  static List<Long> enqueueScan(Context ctx, Library db, List<Long> ids) {
+    if (db == null || ids == null || ids.isEmpty()) return Collections.emptyList();
+    Context appCtx = ctx.getApplicationContext();
+    List<Long> batch = new ArrayList<>();
+    synchronized (LOCK) {
+      for (long id : ids) if (scanningIds.add(id)) batch.add(id);
+      if (batch.isEmpty()) return Collections.emptyList();
+      if (!scanRunning) {
+        scanRunning = true;
+        scanDone = 0;
+        scanTotal = 0;
+        scanBanner = "책과 표지를 확인하고 있습니다…";
+        scanNotifText = "폴더 목록을 읽고 있습니다…";
+      }
+    }
+    ensureForegroundStarted(appCtx);
+    SCAN_EXECUTOR.execute(() -> runScanBatch(appCtx, db, batch));
+    return batch;
+  }
+
+  private static void runScanBatch(Context appCtx, Library db, List<Long> batch) {
+    ArrayList<String> problems = new ArrayList<>();
+    for (long id : batch) {
+      Library.Source src = db.source(id);
+      try {
+        db.scan(
+            id,
+            new Library.Notice() {
+              public void changed() {
+                pendingScanRefresh = true;
+                ScanListener sl = scanListener;
+                if (sl != null) sl.onScanChanged();
+              }
+
+              public void progress(int done, int total) {
+                if (total <= 1) return;
+                scanDone = done;
+                scanTotal = total;
+                String banner = "책과 표지를 확인하고 있습니다… (" + done + " / " + total + ")";
+                scanBanner = banner;
+                scanNotifText = done + " / " + total + "권 확인 중";
+                ScanListener sl = scanListener;
+                if (sl != null) sl.onScanProgress(banner);
+                long now = System.currentTimeMillis();
+                if (now - lastScanNotifAt >= 350) {
+                  lastScanNotifAt = now;
+                  DownloadService svc = instance;
+                  if (svc != null) svc.refreshActiveNotification();
+                }
+              }
+            });
+      } catch (Exception e) {
+        String reason = Library.reason(e);
+        if (src != null && WebDav.isUrl(src.url))
+          problems.add("[" + WebDav.displayName(src.url) + "] " + reason);
+        else problems.add(reason);
+      }
+    }
+    boolean stillWorking;
+    boolean finishedAllScans;
+    synchronized (LOCK) {
+      scanningIds.removeAll(batch);
+      finishedAllScans = scanningIds.isEmpty();
+      if (finishedAllScans) {
+        scanRunning = false;
+        scanBanner = "";
+        scanDone = 0;
+        scanTotal = 0;
+      }
+      stillWorking = isAnyWorkRunningLocked();
+    }
+    pendingScanRefresh = true;
+    DownloadService svc = instance;
+    if (svc != null) {
+      if (!stillWorking) svc.stopForegroundClean();
+      else svc.refreshActiveNotification();
+    }
+    ScanListener sl = scanListener;
+    if (sl != null) {
+      sl.onScanFinished(batch, problems);
+    } else if (finishedAllScans) {
+      if (!problems.isEmpty()) pendingScanProblems = android.text.TextUtils.join("\n\n", problems);
+      postScanCompletionNotification(appCtx, problems.isEmpty());
+    }
   }
 
   static boolean isRunning() {
@@ -286,13 +429,17 @@ public final class DownloadService extends Service {
     return session;
   }
 
-  private static void launchSession(Context appCtx, Session session) {
+  private static void ensureForegroundStarted(Context appCtx) {
     try {
       Intent in = new Intent(appCtx, DownloadService.class).setAction(ACTION_START);
       ContextCompat.startForegroundService(appCtx, in);
     } catch (Exception ignored) {
       // 테스트 환경이나 OS 제약 시에도 앱 내부 백그라운드 스레드로 계속 실행한다.
     }
+  }
+
+  private static void launchSession(Context appCtx, Session session) {
+    ensureForegroundStarted(appCtx);
     EXECUTOR.execute(() -> runSession(appCtx, session));
   }
 
@@ -309,6 +456,7 @@ public final class DownloadService extends Service {
   static void cancelActive(Context ctx) {
     Session prev;
     RemoteBooks.Cancel itemCancel = null;
+    boolean stillWorking;
     synchronized (LOCK) {
       prev = active;
       pendingOpenBookId = 0L;
@@ -319,6 +467,7 @@ public final class DownloadService extends Service {
         itemCancel = prev.itemCancel;
         active = null;
       }
+      stillWorking = isAnyWorkRunningLocked();
     }
     if (itemCancel != null) {
       RemoteBooks.Cancel c = itemCancel;
@@ -326,7 +475,10 @@ public final class DownloadService extends Service {
       EXECUTOR.execute(c::cancel);
     }
     DownloadService svc = instance;
-    if (svc != null) svc.stopForegroundClean();
+    if (svc != null) {
+      if (!stillWorking) svc.stopForegroundClean();
+      else svc.refreshActiveNotification();
+    }
     Listener l = listener;
     if (l != null && prev != null) l.onDownloadCancelled(prev.id);
   }
@@ -460,6 +612,7 @@ public final class DownloadService extends Service {
       int completed;
       long openId;
       boolean batch;
+      boolean stillWorking;
       synchronized (LOCK) {
         wasActive = (active == session && !session.stopAll);
         session.running = false;
@@ -467,11 +620,15 @@ public final class DownloadService extends Service {
         completed = session.completedCount;
         openId = session.openBookId;
         batch = session.batchMode;
+        stillWorking = isAnyWorkRunningLocked();
       }
       if (!wasActive) return;
       pendingRefresh = true;
       DownloadService svc = instance;
-      if (svc != null) svc.stopForegroundClean();
+      if (svc != null) {
+        if (!stillWorking) svc.stopForegroundClean();
+        else svc.refreshActiveNotification();
+      }
 
       Listener l = listener;
       if (l != null) {
@@ -483,6 +640,7 @@ public final class DownloadService extends Service {
     } catch (Exception e) {
       boolean wasActive;
       boolean batch;
+      boolean stillWorking;
       synchronized (LOCK) {
         wasActive = (active == session);
         batch = session.batchMode;
@@ -490,9 +648,13 @@ public final class DownloadService extends Service {
         session.current = null;
         session.itemCancel = null;
         if (wasActive) active = null;
+        stillWorking = isAnyWorkRunningLocked();
       }
       DownloadService svc = instance;
-      if (svc != null && active == null) svc.stopForegroundClean();
+      if (svc != null) {
+        if (!stillWorking) svc.stopForegroundClean();
+        else svc.refreshActiveNotification();
+      }
       Listener l = listener;
       if (e instanceof InterruptedIOException) {
         if (l != null && wasActive) l.onDownloadCancelled(session.id);
@@ -601,6 +763,57 @@ public final class DownloadService extends Service {
     }
   }
 
+  private static Notification buildActiveNotification(Context ctx) {
+    Session s = active;
+    if (s != null && s.running) return buildProgressNotification(ctx, s);
+    if (scanRunning) return buildScanNotification(ctx);
+    return buildProgressNotification(ctx, null);
+  }
+
+  private static Notification buildScanNotification(Context ctx) {
+    ensureChannel(ctx);
+    int total = scanTotal, done = scanDone;
+    Notification.Builder b =
+        new Notification.Builder(ctx, CHANNEL_ID)
+            .setSmallIcon(R.drawable.icon_remote)
+            .setContentTitle("책과 표지 확인 중")
+            .setContentText(scanNotifText)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(openAppIntent(ctx))
+            .setProgress(Math.max(1, total), Math.max(0, done), total <= 0);
+    if (Build.VERSION.SDK_INT >= 31) {
+      b.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE);
+    }
+    return b.build();
+  }
+
+  private static void postScanCompletionNotification(Context ctx, boolean ok) {
+    try {
+      ensureChannel(ctx);
+      NotificationManager nm = (NotificationManager) ctx.getSystemService(NOTIFICATION_SERVICE);
+      if (nm == null) return;
+      Notification n =
+          new Notification.Builder(ctx, CHANNEL_ID)
+              .setSmallIcon(R.drawable.icon_remote)
+              .setContentTitle(ok ? "책과 표지 확인 완료" : "폴더 확인 중 오류 발생")
+              .setContentText(ok ? "서재 목록이 최신 상태로 업데이트되었습니다." : "앱을 열어 자세한 내용을 확인하세요.")
+              .setAutoCancel(true)
+              .setContentIntent(openAppIntent(ctx))
+              .build();
+      nm.notify(SCAN_DONE_NOTIF_ID, n);
+    } catch (Exception ignored) {
+    }
+  }
+
+  private void refreshActiveNotification() {
+    try {
+      NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+      if (nm != null) nm.notify(NOTIF_ID, buildActiveNotification(this));
+    } catch (Exception ignored) {
+    }
+  }
+
   private void updateNotification(Session s) {
     try {
       NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
@@ -653,14 +866,17 @@ public final class DownloadService extends Service {
       cancelActive(this);
       return START_NOT_STICKY;
     }
-    Session s = active;
-    Notification n = buildProgressNotification(this, s);
+    boolean hasWork;
+    synchronized (LOCK) {
+      hasWork = isAnyWorkRunningLocked();
+    }
+    Notification n = buildActiveNotification(this);
     if (Build.VERSION.SDK_INT >= 29) {
       startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
     } else {
       startForeground(NOTIF_ID, n);
     }
-    if (s == null || !s.running) {
+    if (!hasWork) {
       stopForegroundClean();
       return START_NOT_STICKY;
     }

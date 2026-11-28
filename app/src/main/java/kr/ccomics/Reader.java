@@ -48,6 +48,9 @@ final class Reader extends View {
   final String geometryKey;
   long touchStart;
   float peakTravel;
+  final Runnable edgeLongPress = this::fireEdgeLongPress;
+  boolean edgeLongPressArmed;
+  float edgeLongPressX;
 
   void inspectGeometry() {
     if (closed || checking || target >= 0 || !dual() || checked >= count() || checked > page + 7)
@@ -121,10 +124,6 @@ final class Reader extends View {
             return true;
           }
 
-          public void onLongPress(MotionEvent e) {
-            handleLongPress(e);
-          }
-
           public boolean onFling(MotionEvent a, MotionEvent b, float vx, float vy) {
             if (mode == 3 && zoom == 1 && !pinched) {
               fling.fling(0, 0, 0, (int) -vy, 0, 0, -100000, 100000);
@@ -136,7 +135,9 @@ final class Reader extends View {
         };
     immediateTaps = new GestureDetector(host, taps);
     immediateTaps.setOnDoubleTapListener(null);
+    immediateTaps.setIsLongpressEnabled(false);
     centerDoubleTaps = new GestureDetector(host, taps);
+    centerDoubleTaps.setIsLongpressEnabled(false);
     activeTaps = immediateTaps;
     pinch =
         new ScaleGestureDetector(
@@ -190,20 +191,39 @@ final class Reader extends View {
     return true;
   }
 
+  static final long LONG_PRESS_VOLUME_MS = 450L;
+
+  void cancelEdgeLongPress() {
+    if (edgeLongPressArmed) {
+      edgeLongPressArmed = false;
+      removeCallbacks(edgeLongPress);
+    }
+  }
+
+  void fireEdgeLongPress() {
+    if (!edgeLongPressArmed) return;
+    edgeLongPressArmed = false;
+    handleLongPressAt(edgeLongPressX);
+  }
+
   boolean handleLongPress(MotionEvent e) {
+    return handleLongPressAt(e.getX());
+  }
+
+  boolean handleLongPressAt(float x) {
     if (!longPressVolume
         || closed
         || pinched
-        || drag
         || brightnessDrag
         || pinch.isInProgress()
         || zoom > 1
         || host.overlay != null
-        || center(e.getX())) return false;
+        || center(x)) return false;
     skipTouch = true;
+    drag = false;
     cancelTurn();
     performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-    if (inLeftZone(e.getX()) == rtl) host.nextVolume();
+    if (inLeftZone(x) == rtl) host.nextVolume();
     else host.previousVolume();
     return true;
   }
@@ -720,6 +740,7 @@ final class Reader extends View {
     int action = e.getActionMasked();
     float x = e.getX(), y = e.getY();
     if (action == MotionEvent.ACTION_DOWN) {
+      cancelEdgeLongPress();
       if (animator != null) animator.end();
       skipTouch = waitingToCommit;
       brightnessDrag = false;
@@ -732,9 +753,19 @@ final class Reader extends View {
       touchStart = android.os.SystemClock.uptimeMillis();
       peakTravel = 0;
       touchAnchor = Math.max(0, Math.min(1, y / getHeight()));
+      if (!skipTouch
+          && longPressVolume
+          && zoom == 1
+          && host.overlay == null
+          && !center(x)) {
+        edgeLongPressArmed = true;
+        edgeLongPressX = x;
+        postDelayed(edgeLongPress, LONG_PRESS_VOLUME_MS);
+      }
     }
     if (skipTouch) return true;
     if (action == MotionEvent.ACTION_POINTER_DOWN) {
+      cancelEdgeLongPress();
       pinched = true;
       brightnessDrag = false;
       cancelTurn();
@@ -744,6 +775,10 @@ final class Reader extends View {
     if (action == MotionEvent.ACTION_MOVE && !pinched && !pinch.isInProgress()) {
       float dx = x - downX;
       float dy = y - downY;
+      if (edgeLongPressArmed) {
+        float holdTol = host.dp(20);
+        if (dx * dx + dy * dy > holdTol * holdTol) cancelEdgeLongPress();
+      }
       if (!brightnessDrag
           && brightnessGesture
           && !drag
@@ -752,6 +787,7 @@ final class Reader extends View {
           && downX < getWidth() * .18f
           && Math.abs(dy) > host.dp(12)
           && Math.abs(dy) > Math.abs(dx) * 1.8f) {
+        cancelEdgeLongPress();
         brightnessDrag = true;
         initialBrightness = host.getWindow().getAttributes().screenBrightness;
         if (initialBrightness < 0)
@@ -767,32 +803,40 @@ final class Reader extends View {
         attrs.screenBrightness = Math.max(.03f, Math.min(1, initialBrightness - dy / getHeight()));
         host.getWindow().setAttributes(attrs);
       } else if (zoom > 1) {
+        cancelEdgeLongPress();
         panX += x - lastX;
         panY += y - lastY;
         clampPan();
         invalidate();
       } else if (mode == 3) {
+        if (Math.abs(dy) > host.dp(16)) cancelEdgeLongPress();
         advanceScroll(lastY - y);
       } else if (!panFit(x - lastX, y - lastY)
           && swipeTurn
           && (drag
               || Math.abs(dx) > ViewConfiguration.get(host).getScaledTouchSlop()
                   && Math.abs(dx) > Math.abs(dy))) {
-        int dir = (rtl ? dx : -dx) > 0 ? 1 : -1;
-        if (!drag) {
-          drag = true;
-          startTurn(dir);
-        }
-        if (target >= 0) {
-          boolean half = dual() && spread(page).length == 2 && spread(target).length == 2;
-          progress = Math.max(0, Math.min(1, (-side * dx) / (getWidth() * (half ? 1 : 2))));
-          peakTravel = Math.max(peakTravel, progress);
-          tilt =
-              Math.max(
-                  -1, Math.min(1, 2 * (downY / getHeight() - .5f) + (y - downY) / getHeight()));
-          invalidate();
+        if (!edgeLongPressArmed || Math.abs(dx) > host.dp(20)) {
+          cancelEdgeLongPress();
+          int dir = (rtl ? dx : -dx) > 0 ? 1 : -1;
+          if (!drag) {
+            drag = true;
+            startTurn(dir);
+          }
+          if (target >= 0) {
+            boolean half = dual() && spread(page).length == 2 && spread(target).length == 2;
+            progress = Math.max(0, Math.min(1, (-side * dx) / (getWidth() * (half ? 1 : 2))));
+            peakTravel = Math.max(peakTravel, progress);
+            tilt =
+                Math.max(
+                    -1, Math.min(1, 2 * (downY / getHeight() - .5f) + (y - downY) / getHeight()));
+            invalidate();
+          }
         }
       }
+    }
+    if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+      cancelEdgeLongPress();
     }
     if (action == MotionEvent.ACTION_UP
         && drag
@@ -941,6 +985,7 @@ final class Reader extends View {
     }
     storeScroll();
     closed = true;
+    cancelEdgeLongPress();
     cancelTurn();
     fling.abortAnimation();
     io.execute(

@@ -3809,8 +3809,39 @@ public final class Main extends Activity {
 
   final Set<Long> scanning = new HashSet<>();
 
+  final DownloadService.ScanListener scanListener =
+      new DownloadService.ScanListener() {
+        public void onScanChanged() {
+          handler.removeCallbacks(refresh);
+          handler.postDelayed(refresh, 650);
+        }
+
+        public void onScanProgress(String bannerText) {
+          runOnUiThread(
+              () -> {
+                if (isDestroyed() || loadingBook) return;
+                scanMessage = bannerText;
+                updateScanBanner();
+              });
+        }
+
+        public void onScanFinished(List<Long> finishedIds, List<String> problems) {
+          runOnUiThread(
+              () -> {
+                if (isDestroyed()) return;
+                scanning.removeAll(finishedIds);
+                if (!DownloadService.isScanning()) {
+                  scanning.clear();
+                  if (!loadingBook) scanMessage = "";
+                }
+                library(true);
+                if (!problems.isEmpty()) alert("폴더를 읽을 수 없습니다", TextUtils.join("\n\n", problems));
+              });
+        }
+      };
+
   boolean refreshSources(boolean pulled) {
-    if (!scanning.isEmpty()) return false;
+    if (!scanning.isEmpty() || DownloadService.isScanning()) return false;
     List<Long> ids = new ArrayList<>();
     int totalSources = 0;
     try (android.database.Cursor c =
@@ -3839,48 +3870,18 @@ public final class Main extends Activity {
     List<Long> batch = new ArrayList<>();
     for (long id : ids) if (scanning.add(id)) batch.add(id);
     if (batch.isEmpty()) return;
-    scanMessage = "책과 표지를 확인하고 있습니다…";
-    updateScanBanner();
-    worker.execute(
-        () -> {
-          ArrayList<String> problems = new ArrayList<>();
-          for (long id : batch) {
-            Library.Source src = db.source(id);
-            try {
-              db.scan(
-                  id,
-                  new Library.Notice() {
-                    public void changed() {
-                      handler.removeCallbacks(refresh);
-                      handler.postDelayed(refresh, 650);
-                    }
-
-                    public void progress(int done, int total) {
-                      if (total <= 1) return;
-                      runOnUiThread(
-                          () -> {
-                            if (isDestroyed() || loadingBook) return;
-                            scanMessage = "책과 표지를 확인하고 있습니다… (" + done + " / " + total + ")";
-                            updateScanBanner();
-                          });
-                    }
-                  });
-            } catch (Exception e) {
-              String reason = Library.reason(e);
-              if (src != null && WebDav.isUrl(src.url))
-                problems.add("[" + WebDav.displayName(src.url) + "] " + reason);
-              else problems.add(reason);
-            }
-          }
-          runOnUiThread(
-              () -> {
-                if (isDestroyed()) return;
-                scanning.removeAll(batch);
-                if (scanning.isEmpty()) scanMessage = "";
-                library(true);
-                if (!problems.isEmpty()) alert("폴더를 읽을 수 없습니다", TextUtils.join("\n\n", problems));
-              });
-        });
+    if (db == null) return;
+    maybeRequestNotificationPermission();
+    if (!loadingBook) {
+      scanMessage = "책과 표지를 확인하고 있습니다…";
+      updateScanBanner();
+    }
+    DownloadService.setScanListener(scanListener);
+    List<Long> started = DownloadService.enqueueScan(this, db, batch);
+    if (started.isEmpty()) {
+      scanning.clear();
+      scanning.addAll(DownloadService.activeScanIds());
+    }
   }
 
   void settings() {
@@ -4801,43 +4802,58 @@ public final class Main extends Activity {
         });
   }
 
+  List<Library.Book> seriesVolumesForReader(Library.Book current) {
+    List<Library.Book> group = groups.get(current.grp);
+    if (group != null && !group.isEmpty()) return group;
+    if (db == null || current.grp == null || current.grp.isEmpty()) return Collections.emptyList();
+    List<Library.Book> loaded = new ArrayList<>();
+    try (android.database.Cursor c =
+        db.getReadableDatabase()
+            .rawQuery(
+                Library.SELECT + " WHERE missing=0 AND bundle=0 AND grp=?",
+                new String[] {current.grp})) {
+      while (c.moveToNext()) loaded.add(new Library.Book(c));
+    }
+    Order.sortBooks(loaded);
+    if (!loaded.isEmpty()) groups.put(current.grp, loaded);
+    return loaded;
+  }
+
   void nextVolume() {
-    if (reader == null || loadingBook) return;
-    List<Library.Book> group = groups.get(reader.book.grp);
-    if (group != null)
-      for (int i = 0; i + 1 < group.size(); i++)
-        if (group.get(i).id == reader.book.id) {
-          Library.Book next = group.get(i + 1);
-          if (prefs.getBoolean("autoNext", true)) open(next);
-          else
-            dialog()
-                .setTitle("다음 권 읽기")
-                .setMessage(next.title)
-                .setPositiveButton("열기", (d, w) -> open(next))
-                .setNegativeButton("취소", null)
-                .show();
-          return;
-        }
+    if (reader == null || DownloadService.isWaitingToOpen()) return;
+    List<Library.Book> group = seriesVolumesForReader(reader.book);
+    for (int i = 0; i + 1 < group.size(); i++)
+      if (group.get(i).id == reader.book.id) {
+        Library.Book next = group.get(i + 1);
+        if (prefs.getBoolean("autoNext", true)) open(next);
+        else
+          dialog()
+              .setTitle("다음 권 읽기")
+              .setMessage(next.title)
+              .setPositiveButton("열기", (d, w) -> open(next))
+              .setNegativeButton("취소", null)
+              .show();
+        return;
+      }
     toast("마지막 권입니다.");
   }
 
   void previousVolume() {
-    if (reader == null || loadingBook) return;
-    List<Library.Book> group = groups.get(reader.book.grp);
-    if (group != null)
-      for (int i = 1; i < group.size(); i++)
-        if (group.get(i).id == reader.book.id) {
-          Library.Book prev = group.get(i - 1);
-          if (prefs.getBoolean("autoNext", true)) open(prev);
-          else
-            dialog()
-                .setTitle("이전 권 읽기")
-                .setMessage(prev.title)
-                .setPositiveButton("열기", (d, w) -> open(prev))
-                .setNegativeButton("취소", null)
-                .show();
-          return;
-        }
+    if (reader == null || DownloadService.isWaitingToOpen()) return;
+    List<Library.Book> group = seriesVolumesForReader(reader.book);
+    for (int i = 1; i < group.size(); i++)
+      if (group.get(i).id == reader.book.id) {
+        Library.Book prev = group.get(i - 1);
+        if (prefs.getBoolean("autoNext", true)) open(prev);
+        else
+          dialog()
+              .setTitle("이전 권 읽기")
+              .setMessage(prev.title)
+              .setPositiveButton("열기", (d, w) -> open(prev))
+              .setNegativeButton("취소", null)
+              .show();
+        return;
+      }
     toast("첫 권입니다.");
   }
 
@@ -4860,6 +4876,13 @@ public final class Main extends Activity {
   protected void onResume() {
     super.onResume();
     DownloadService.setListener(downloadListener);
+    DownloadService.setScanListener(scanListener);
+    if (DownloadService.isScanning()) {
+      scanning.clear();
+      scanning.addAll(DownloadService.activeScanIds());
+    } else if (!scanning.isEmpty()) {
+      scanning.clear();
+    }
     if (DownloadService.isRunning()) {
       activeDownloadSession = DownloadService.activeSessionId();
       loadingBook = true;
@@ -4870,10 +4893,11 @@ public final class Main extends Activity {
       if (loadingBook && activeDownloadSession > 0) {
         activeDownloadSession = 0;
         loadingBook = false;
-        scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
-        if (reader == null) updateScanBanner();
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
       }
+      scanMessage =
+          DownloadService.isScanning() ? DownloadService.currentScanBanner() : "";
+      if (reader == null) updateScanBanner();
       if (DownloadService.consumePendingRefresh() && reader == null && db != null) {
         refreshRemoteEntries();
       }
@@ -4883,12 +4907,18 @@ public final class Main extends Activity {
         if (doneBook != null && RemoteBooks.has(this, doneBook.url)) open(doneBook);
       }
     }
+    if (DownloadService.consumePendingScanRefresh() && reader == null && db != null) {
+      library(true);
+    }
+    String scanErr = DownloadService.consumePendingScanProblems();
+    if (!scanErr.isEmpty()) alert("폴더를 읽을 수 없습니다", scanErr);
   }
 
   protected void onPause() {
     if (reader != null) reader.storeScroll();
-    // 백그라운드로 이동해도 DownloadService는 계속 실행되도록 리스너만 분리한다.
+    // 백그라운드로 이동해도 DownloadService(다운로드·책 표지 색인)는 계속 실행되도록 리스너만 분리한다.
     DownloadService.setListener(null);
+    DownloadService.setScanListener(null);
     super.onPause();
   }
 
@@ -4938,8 +4968,9 @@ public final class Main extends Activity {
   protected void onDestroy() {
     if (dragController != null) dragController.cancel();
     if (reader != null) reader.close();
-    // 포그라운드 서비스로 실행 중인 백그라운드 다운로드는 Activity가 내려가도 유지한다.
+    // 포그라운드 서비스로 실행 중인 백그라운드 다운로드·책 색인은 Activity가 내려가도 유지한다.
     DownloadService.setListener(null);
+    DownloadService.setScanListener(null);
     handler.removeCallbacks(refresh);
     if (pendingThumbResize != null) handler.removeCallbacks(pendingThumbResize);
     worker.shutdown();

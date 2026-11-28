@@ -332,6 +332,23 @@ final class SettingsUi {
     return track;
   }
 
+  static long tempCacheBytes(android.content.Context ctx) {
+    long total = 0;
+    java.io.File cache = ctx.getCacheDir();
+    if (cache != null && cache.isDirectory()) {
+      java.io.File[] spools = cache.listFiles((dir, n) -> n.startsWith("pages-"));
+      if (spools != null) for (java.io.File f : spools) if (f.isFile()) total += f.length();
+      java.io.File remoteDir = new java.io.File(cache, "remote");
+      java.io.File[] remote = remoteDir.listFiles();
+      if (remote != null) for (java.io.File f : remote) if (f.isFile()) total += f.length();
+    }
+    return total;
+  }
+
+  private long tempCacheBytes() {
+    return tempCacheBytes(host);
+  }
+
   private String appVersionLabel() {
     try {
       PackageInfo info = host.getPackageManager().getPackageInfo(host.getPackageName(), 0);
@@ -465,19 +482,42 @@ final class SettingsUi {
                   : "PC·PikPak에서 받아 둔 오프라인 책을 관리합니다";
           addActionRow(storageCard, "원격 보관함 관리", storageSub, storageBadge, host::remoteStorage);
 
+          long tempBytes = tempCacheBytes();
+          String tempBadge = tempBytes > 0 ? RemoteBooks.formatSize(tempBytes) : "비어 있음";
           addActionRow(
               storageCard,
               "임시 파일 정리",
               "표지 썸네일·스트리밍 임시 캐시만 비웁니다 (저장본 유지)",
-              null,
-              () ->
-                  host.worker.execute(
-                      () -> {
-                        Archive.clearSpools(host);
-                        WebDav.Cache.clear(host);
-                        host.coverCache.evictAll();
-                        host.runOnUiThread(() -> host.toast("임시 파일을 정리했습니다."));
-                      }));
+              tempBadge,
+              () -> {
+                long curBytes = tempCacheBytes();
+                String msg =
+                    curBytes > 0
+                        ? "임시 파일 ("
+                            + RemoteBooks.formatSize(curBytes)
+                            + ")을 삭제하시겠습니까?\n원격 보관함에 받아 둔 책과 읽던 기록은 유지됩니다."
+                        : "임시 파일을 삭제하시겠습니까?\n원격 보관함에 받아 둔 책과 읽던 기록은 유지됩니다.";
+                host.dialog()
+                    .setTitle("임시 파일 정리")
+                    .setMessage(msg)
+                    .setPositiveButton(
+                        "확인",
+                        (d, w) ->
+                            host.worker.execute(
+                                () -> {
+                                  Archive.clearSpools(host);
+                                  WebDav.Cache.clear(host);
+                                  host.coverCache.evictAll();
+                                  host.runOnUiThread(
+                                      () -> {
+                                        if (host.isDestroyed()) return;
+                                        host.toast("임시 파일을 정리했습니다.");
+                                        host.refreshSettingsView();
+                                      });
+                                }))
+                    .setNegativeButton("취소", null)
+                    .show();
+              });
 
           // ── 4. 앱 정보 ──
           LinearLayout appCard = section(content, "앱 정보");

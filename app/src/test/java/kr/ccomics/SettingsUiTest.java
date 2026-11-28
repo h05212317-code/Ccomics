@@ -218,4 +218,40 @@ public class SettingsUiTest {
       RemoteBooks.clear(host);
     }
   }
+
+  @Test
+  public void tempCacheRowShowsSizeAndConfirmsBeforeDeleting() throws Exception {
+    Main host = Robolectric.buildActivity(Main.class).get();
+    host.prefs = host.getSharedPreferences("temp-cache-ui-test", 0);
+    host.frame = new FrameLayout(host);
+    host.setContentView(host.frame);
+    host.theme();
+    WebDav.Cache.clear(host);
+    java.io.File dummy = new java.io.File(WebDav.Cache.dir(host), "sample.part");
+    try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(dummy, "rw")) {
+      raf.setLength(2L << 20); // 2.0MB
+    }
+    try (Library lib = new Library(host)) {
+      host.db = lib;
+      host.settings();
+      assertEquals(2L << 20, SettingsUi.tempCacheBytes(host));
+      assertNotNull(findText(host.settingsOverlay, "2.0MB"));
+
+      TextView tempRowTitle = findText(host.settingsOverlay, "임시 파일 정리");
+      assertNotNull(tempRowTitle);
+      ((View) tempRowTitle.getParent().getParent()).performClick();
+
+      android.app.AlertDialog dlg = org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog();
+      assertNotNull(dlg);
+      assertTrue(dlg.isShowing());
+      String msg = org.robolectric.Shadows.shadowOf(dlg).getMessage().toString();
+      assertTrue(msg.contains("2.0MB"));
+      assertTrue(msg.contains("삭제하시겠습니까"));
+      assertEquals("확인", dlg.getButton(android.content.DialogInterface.BUTTON_POSITIVE).getText());
+      assertEquals("취소", dlg.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).getText());
+      dlg.dismiss();
+    } finally {
+      WebDav.Cache.clear(host);
+    }
+  }
 }
