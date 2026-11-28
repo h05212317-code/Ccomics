@@ -161,6 +161,53 @@ public class DownloadServiceTest {
   }
 
   @Test
+  public void detachAutoOpenAndSecondSingleKeepFirstDownloadRunningToCompletion() throws Exception {
+    byte[] bytes1 = new byte[2_200_000];
+    byte[] bytes2 = new byte[2_200_000];
+    new Random(71).nextBytes(bytes1);
+    new Random(72).nextBytes(bytes2);
+    MockWebServer s = new MockWebServer();
+    s.setDispatcher(
+        new Dispatcher() {
+          public MockResponse dispatch(RecordedRequest r) {
+            byte[] src = r.getPath().contains("first") ? bytes1 : bytes2;
+            return RemoteBooksTest.range(src, r, 128_000);
+          }
+        });
+    s.start();
+    Context ctx = RuntimeEnvironment.getApplication();
+    RemoteBooks.clear(ctx);
+    DownloadService.setListener(null);
+    String u1 = s.url("/pikpak/first.zip").toString();
+    String u2 = s.url("/pikpak/second.zip").toString();
+    try {
+      // 1) 단일 다운로드 시작 후 detachAutoOpen 호출(뒤로가기·다른 책 열기 상황) -> 자동 열기만 해제되고 파일은 끝까지 보관됨
+      int sid = DownloadService.startSingle(ctx, new DownloadService.Target(11L, u1, "1권", ""));
+      assertTrue(sid > 0);
+      DownloadService.detachAutoOpen();
+      assertFalse(DownloadService.isWaitingToOpen());
+      assertTrue(DownloadService.isRunning());
+
+      // 2) 그 와중에 다른 원격 책을 직접 눌러도(startSingle) 1권을 버리지 않고 2권 우선 후 1권도 끝까지 완료됨
+      int sid2 = DownloadService.startSingle(ctx, new DownloadService.Target(12L, u2, "2권", ""));
+      assertEquals(sid, sid2);
+
+      long deadline = System.currentTimeMillis() + 15_000;
+      while (DownloadService.isRunning() && System.currentTimeMillis() < deadline) {
+        Thread.sleep(40);
+      }
+      assertFalse(DownloadService.isRunning());
+      assertTrue("first volume should still finish caching", RemoteBooks.has(ctx, u1));
+      assertTrue("second volume should also finish caching", RemoteBooks.has(ctx, u2));
+      assertEquals(12L, DownloadService.consumePendingOpenBookId());
+    } finally {
+      DownloadService.cancelActive(ctx);
+      RemoteBooks.clear(ctx);
+      s.shutdown();
+    }
+  }
+
+  @Test
   public void backgroundScanCompletesInForegroundServiceWithoutActivityListener() throws Exception {
     android.graphics.Bitmap bmp =
         android.graphics.Bitmap.createBitmap(16, 24, android.graphics.Bitmap.Config.ARGB_8888);

@@ -82,6 +82,7 @@ public final class Main extends Activity {
   String selected = "", shelf = "", query = "", scanMessage = "";
   int filter, gridIndex, gridOffset, volumeIndex, volumeOffset;
   volatile int requestId;
+  volatile int downloadCancelEpoch;
   volatile int activeDownloadSession;
   boolean busy, loadingBook, dark, readerImmersive, arrangeMode, resumeDismissed, floatingResumeVisible;
   int bg, ink, muted, surface, accent;
@@ -1244,6 +1245,7 @@ public final class Main extends Activity {
       item.addView(label(String.valueOf(counts[i]), 14, active ? countAccentColor() : muted, true));
       item.setOnClickListener(
           v -> {
+            detachDownloadAutoOpen();
             filter = idx;
             selected = "";
             gridIndex = gridOffset = 0;
@@ -1284,6 +1286,7 @@ public final class Main extends Activity {
       item.addView(label(String.valueOf(scount), 14, active ? countAccentColor() : muted, true));
       item.setOnClickListener(
           v -> {
+            detachDownloadAutoOpen();
             shelf = targetShelf;
             selected = "";
             gridIndex = gridOffset = 0;
@@ -1638,7 +1641,9 @@ public final class Main extends Activity {
       hideReaderStatusBanner();
       return;
     }
-    if (scanMessage.isEmpty() || !loadingBook) {
+    boolean waitingInReader =
+        loadingBook && (DownloadService.isWaitingToOpen() || !DownloadService.isRunning());
+    if (scanMessage.isEmpty() || !waitingInReader) {
       hideReaderStatusBanner();
       return;
     }
@@ -1772,7 +1777,7 @@ public final class Main extends Activity {
       bar.addView(backBtn, dp(44), dp(44));
       backBtn.setOnClickListener(
           w -> {
-            if (loadingBook) cancelLoadingBook();
+            detachDownloadAutoOpen();
             selected = "";
             renderNow(false);
           });
@@ -1875,6 +1880,16 @@ public final class Main extends Activity {
     scanBanner = label(bannerText, 13, accent, true);
     pad(scanBanner, 20, 6);
     scanBanner.setVisibility(bannerText.isEmpty() ? View.GONE : View.VISIBLE);
+    scanBanner.setOnClickListener(
+        v -> {
+          if (!DownloadService.isRunning()) return;
+          dialog()
+              .setTitle("다운로드 취소")
+              .setMessage("진행 중인 다운로드를 취소할까요?")
+              .setPositiveButton("취소하기", (d, w) -> cancelLoadingBook())
+              .setNegativeButton("계속 받기", null)
+              .show();
+        });
     root.addView(scanBanner);
     FrameLayout body = new FrameLayout(this);
     root.addView(body, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -2547,6 +2562,7 @@ public final class Main extends Activity {
               v -> {
                 if (arrangeMode || h.item == null) return;
                 remember();
+                detachDownloadAutoOpen();
                 volumeIndex = volumeOffset = 0;
                 selected = h.item.book.grp;
                 renderNow(false);
@@ -3177,6 +3193,7 @@ public final class Main extends Activity {
             open(book);
             return;
           }
+          detachDownloadAutoOpen();
           volumeIndex = volumeOffset = 0;
           selected = book.grp;
           renderNow(false);
@@ -3970,6 +3987,7 @@ public final class Main extends Activity {
         items.toArray(new String[0]),
         i -> {
           if (i < n) {
+            detachDownloadAutoOpen();
             shelf = i == 0 ? "" : items.get(i);
             selected = "";
             gridIndex = gridOffset = 0;
@@ -4363,11 +4381,20 @@ public final class Main extends Activity {
 
   void cancelLoadingBook() {
     requestId++;
+    downloadCancelEpoch++;
     loadingBook = false;
     abortActiveDownload();
     getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
     updateScanBanner();
+  }
+
+  /** 뒤로가기·서랍 이동·다른 작품 탐색 시 자동 열기 예약만 해제하고 진행 중인 다운로드는 유지한다. */
+  void detachDownloadAutoOpen() {
+    if (DownloadService.isWaitingToOpen()) {
+      requestId++;
+      DownloadService.detachAutoOpen();
+    }
   }
 
   /** 원격 책 여러 권을 열지 않고 백그라운드 포그라운드 서비스 대기열에 추가해 받아 둔다(기존 받기 취소 없음). */
@@ -4464,6 +4491,7 @@ public final class Main extends Activity {
     remember();
     resumeDismissed = false;
     int token = ++requestId;
+    int cancelEpoch = downloadCancelEpoch;
     boolean needDownload = WebDav.isUrl(b.url) && !RemoteBooks.has(this, b.url);
     if (needDownload) {
       maybeRequestNotificationPermission();
@@ -4475,11 +4503,17 @@ public final class Main extends Activity {
           () -> {
             try {
               String auth = db.httpAuth(b.source);
-              if (token != requestId || isDestroyed()) return;
+              if (cancelEpoch != downloadCancelEpoch || isDestroyed()) return;
               DownloadService.setListener(downloadListener);
-              activeDownloadSession =
-                  DownloadService.startSingle(
-                      this, new DownloadService.Target(b.id, b.url, volumeTitle(b), auth));
+              DownloadService.Target target =
+                  new DownloadService.Target(b.id, b.url, volumeTitle(b), auth);
+              if (token == requestId) {
+                activeDownloadSession = DownloadService.startSingle(this, target);
+              } else {
+                DownloadService.EnqueueResult res =
+                    DownloadService.enqueueBatch(this, Collections.singletonList(target));
+                activeDownloadSession = res.sessionId;
+              }
             } catch (Exception e) {
               runOnUiThread(
                   () -> {
@@ -4496,10 +4530,9 @@ public final class Main extends Activity {
           });
       return;
     }
-    // 이미 휴대폰에 있는 책(로컬/보관함)을 열 때는 백그라운드 미리 받기 대기열을 끊지 않는다.
+    // 이미 휴대폰에 있는 책(로컬/보관함)을 열 때는 진행 중인 다운로드를 끊지 않고 자동 열기 예약만 해제한다.
     if (DownloadService.isWaitingToOpen()) {
-      DownloadService.cancelOpenWaitOnly();
-      if (DownloadService.isWaitingToOpen()) abortActiveDownload();
+      DownloadService.detachAutoOpen();
     }
     loadingBook = true;
     scanMessage = reader != null ? volumeTitle(b) + " 여는 중…" : "책을 여는 중…";
@@ -4527,8 +4560,12 @@ public final class Main extends Activity {
                     }
                     return;
                   }
-                  loadingBook = false;
-                  scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+                  boolean bgDownloading = DownloadService.isRunning();
+                  loadingBook = bgDownloading;
+                  scanMessage =
+                      bgDownloading
+                          ? DownloadService.currentBanner()
+                          : (scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…");
                   if (reader != null) reader.close();
                   grid = null;
                   shelfList = null;
@@ -4554,8 +4591,12 @@ public final class Main extends Activity {
             runOnUiThread(
                 () -> {
                   if (isDestroyed() || token != requestId) return;
-                  loadingBook = false;
-                  scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+                  boolean bgDownloading = DownloadService.isRunning();
+                  loadingBook = bgDownloading;
+                  scanMessage =
+                      bgDownloading
+                          ? DownloadService.currentBanner()
+                          : (scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…");
                   updateScanBanner();
                   if (e instanceof InterruptedIOException) return;
                   alert("책을 열 수 없습니다", Library.reason(e));
@@ -4563,7 +4604,7 @@ public final class Main extends Activity {
           } finally {
             runOnUiThread(
                 () -> {
-                  if (token == requestId && !isDestroyed())
+                  if (token == requestId && !isDestroyed() && !DownloadService.isRunning())
                     getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 });
           }
@@ -4946,8 +4987,18 @@ public final class Main extends Activity {
   void leaveReader() {
     closeSettings();
     closeTouchZoneEditor();
-    cancelLoadingBook();
+    requestId++;
+    DownloadService.detachAutoOpen();
     hideReaderStatusBanner();
+    boolean bgDownloading = DownloadService.isRunning();
+    loadingBook = bgDownloading;
+    if (!bgDownloading) {
+      getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    }
+    scanMessage =
+        bgDownloading
+            ? DownloadService.currentBanner()
+            : (DownloadService.isScanning() ? DownloadService.currentScanBanner() : "");
     String closedGrp = reader.book.grp;
     reader.close();
     reader = null;
@@ -5030,21 +5081,19 @@ public final class Main extends Activity {
       leaveReader();
       return;
     }
-    if (loadingBook) {
-      cancelLoadingBook();
-      return;
-    }
     if (arrangeMode) {
       arrangeMode = false;
       renderNow(true);
       return;
     }
     if (!selected.isEmpty()) {
+      detachDownloadAutoOpen();
       selected = "";
       renderNow(false);
       return;
     }
     if (!query.isEmpty()) {
+      detachDownloadAutoOpen();
       query = "";
       renderNow(false);
       return;

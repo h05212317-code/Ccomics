@@ -347,22 +347,20 @@ public final class DownloadService extends Service {
             break;
           }
         }
-        if (cur.batchMode && cur.current != null) {
-          // 기존 미리 받기 책은 조각이 남아 있으므로 뒤로 미루고, 열려는 책을 먼저 받는다.
+        if (cur.current != null) {
+          // 기존 받던 책은 조각이 남아 있으므로 뒤로 미루고, 새로 누른 책을 먼저 받은 뒤 기존 책도 이어 받는다.
           cur.queue.addFirst(cur.current);
           cur.queue.addFirst(target);
+          cur.batchMode = true;
           if (!existed) cur.totalPlanned++;
           cur.preempted = true;
           cancelToPreempt = cur.itemCancel;
           sid = cur.id;
         } else {
-          // 이전 단일 열기 대기였으면 이전 세션을 교체한다.
-          cur.stopAll = true;
-          cur.running = false;
-          cancelToPreempt = cur.itemCancel;
-          Session fresh = createSessionLocked(Collections.singletonList(target), false, target.bookId);
-          toStart = fresh;
-          sid = fresh.id;
+          cur.queue.addFirst(target);
+          if (!existed) cur.totalPlanned++;
+          if (cur.queue.size() > 1) cur.batchMode = true;
+          sid = cur.id;
         }
       } else {
         Session fresh = createSessionLocked(Collections.singletonList(target), false, target.bookId);
@@ -460,12 +458,13 @@ public final class DownloadService extends Service {
     EXECUTOR.execute(() -> runSession(appCtx, session));
   }
 
-  /** 단일 열기 대기만 취소(백그라운드 미리 받기가 돌고 있으면 열기 예약만 해제). */
-  static void cancelOpenWaitOnly() {
+  /** 화면 이동·뒤로가기·다른 책 열기 시 자동 열기 예약만 해제하고 진행 중인 다운로드는 백그라운드 보관으로 계속 유지한다. */
+  static void detachAutoOpen() {
     synchronized (LOCK) {
-      if (active != null && active.running && active.batchMode) {
+      pendingOpenBookId = 0L;
+      if (active != null && active.running && !active.stopAll) {
         active.openBookId = 0L;
-        pendingOpenBookId = 0L;
+        active.batchMode = true;
       }
     }
   }

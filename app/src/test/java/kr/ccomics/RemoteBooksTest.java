@@ -389,12 +389,12 @@ public class RemoteBooksTest {
       assertNotNull(remoteBook);
       assertNotNull(localBook);
 
-      // 원격 책 열기 시작 → 뒤로가기 취소 → 즉시 내부 책 열기
+      // 원격 책 받기 시작 → 뒤로가기해도 다운로드 유지 + 곧바로 다른 로컬 책 열기 가능
       host.open(remoteBook);
       assertTrue(host.loadingBook);
       Thread.sleep(200);
       host.onBackPressed();
-      assertFalse(host.loadingBook);
+      assertTrue("back press should keep remote download running", DownloadService.isRunning());
 
       long t0 = System.currentTimeMillis();
       host.open(localBook);
@@ -403,9 +403,12 @@ public class RemoteBooksTest {
         org.robolectric.shadows.ShadowLooper.idleMainLooper();
         Thread.sleep(30);
       }
-      assertNotNull("local book should open immediately after cancelling remote open", host.reader);
+      assertNotNull("local book should open immediately while remote download continues", host.reader);
       assertEquals(localBook.id, host.reader.book.id);
-      assertFalse(host.loadingBook);
+      assertTrue("remote download should remain running in background", DownloadService.isRunning());
+      assertFalse("auto-open should be detached when reading another book", DownloadService.isWaitingToOpen());
+      host.cancelLoadingBook();
+      assertFalse(DownloadService.isRunning());
       host.reader.close();
       host.reader = null;
       host.readerIO.shutdown();
@@ -413,6 +416,7 @@ public class RemoteBooksTest {
       org.robolectric.shadows.ShadowLooper.idleMainLooper();
     } finally {
       releaseServer.countDown();
+      DownloadService.cancelActive(host);
       s.shutdown();
       localZip.delete();
     }

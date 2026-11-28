@@ -58,7 +58,7 @@ public class ReaderFrameTest {
   @After
   public void cleanup() throws Exception {
     if (reader != null) {
-      reader.close();
+      if (!reader.closed) reader.close();
       release.countDown();
       reader.io.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
     }
@@ -374,6 +374,63 @@ public class ReaderFrameTest {
     assertEquals("탐색 3권 받는 중…", host.readerStatusText.getText().toString());
     host.cancelLoadingBook();
     assertNull(host.readerStatusBar);
+  }
+
+  @Test
+  public void backNavigationAndLeaveReaderKeepActiveDownloadRunning() throws Exception {
+    java.util.concurrent.CountDownLatch gate = new java.util.concurrent.CountDownLatch(1);
+    okhttp3.mockwebserver.MockWebServer server = new okhttp3.mockwebserver.MockWebServer();
+    server.setDispatcher(
+        new okhttp3.mockwebserver.Dispatcher() {
+          public okhttp3.mockwebserver.MockResponse dispatch(
+              okhttp3.mockwebserver.RecordedRequest r) {
+            try {
+              gate.await(10, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {
+            }
+            return new okhttp3.mockwebserver.MockResponse()
+                .setResponseCode(206)
+                .setHeader("Content-Range", "bytes 0-0/1048576")
+                .setBody("a");
+          }
+        });
+    server.start();
+    host.frame = new android.widget.FrameLayout(host);
+    host.setContentView(host.frame);
+    host.books = host.db.books();
+    host.groups.clear();
+    for (Library.Book b : host.books)
+      host.groups.computeIfAbsent(b.grp, k -> new java.util.ArrayList<>()).add(b);
+    String url = server.url("/pikpak/keep-alive.zip").toString();
+    try {
+      DownloadService.setListener(null);
+      DownloadService.startSingle(host, new DownloadService.Target(55L, url, "유지 1권", ""));
+      assertTrue(DownloadService.isRunning());
+      assertTrue(DownloadService.isWaitingToOpen());
+
+      // 1. 시리즈 화면에서 뒤로가기 눌러도 다운로드가 끊기지 않고 메인 서재로 돌아간다.
+      host.loadingBook = true;
+      host.selected = "Test";
+      host.renderLibrary();
+      host.onBackPressed();
+      assertEquals("back press should exit series view instead of cancelling", "", host.selected);
+      assertTrue("download must stay running after back press", DownloadService.isRunning());
+      assertFalse("auto-open should be detached after navigating away", DownloadService.isWaitingToOpen());
+
+      // 2. 읽기 화면을 나가도(leaveReader) 진행 중인 백그라운드 다운로드는 계속 유지된다.
+      host.reader = reader;
+      release.countDown();
+      host.leaveReader();
+      reader = null;
+      assertNull(host.reader);
+      assertTrue("download must stay running after leaveReader", DownloadService.isRunning());
+      assertTrue(host.loadingBook);
+    } finally {
+      gate.countDown();
+      DownloadService.cancelActive(host);
+      RemoteBooks.clear(host);
+      server.shutdown();
+    }
   }
 
   @Test
