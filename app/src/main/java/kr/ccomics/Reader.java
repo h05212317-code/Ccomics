@@ -150,10 +150,9 @@ final class Reader extends View {
               }
 
               public boolean onScale(ScaleGestureDetector d) {
-                scaleAt(
-                    Math.max(1, Math.min(5, zoom * d.getScaleFactor())),
-                    d.getFocusX(),
-                    d.getFocusY());
+                float nextZoom = Math.max(1, Math.min(5, zoom * d.getScaleFactor()));
+                if (nextZoom < 1.02f) nextZoom = 1f;
+                scaleAt(nextZoom, d.getFocusX(), d.getFocusY());
                 return true;
               }
             });
@@ -191,12 +190,12 @@ final class Reader extends View {
     return true;
   }
 
-  static final long LONG_PRESS_VOLUME_MS = 450L;
+  static final long LONG_PRESS_VOLUME_MS = 400L;
 
   void cancelEdgeLongPress() {
     if (edgeLongPressArmed) {
       edgeLongPressArmed = false;
-      removeCallbacks(edgeLongPress);
+      host.handler.removeCallbacks(edgeLongPress);
     }
   }
 
@@ -216,12 +215,21 @@ final class Reader extends View {
         || pinched
         || brightnessDrag
         || pinch.isInProgress()
-        || zoom > 1
-        || host.overlay != null
+        || zoom > 1.05f
         || center(x)) return false;
     skipTouch = true;
     drag = false;
     cancelTurn();
+    // GestureDetector/ScaleGestureDetector가 이전 DOWN 상태를 끌어안지 않도록 즉시 CANCEL을 전달한다.
+    long now = android.os.SystemClock.uptimeMillis();
+    MotionEvent cancelEv = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL, x, downY, 0);
+    try {
+      activeTaps.onTouchEvent(cancelEv);
+      if (pinchZoom) pinch.onTouchEvent(cancelEv);
+    } finally {
+      cancelEv.recycle();
+    }
+    if (host.overlay != null) host.toggleReaderMenu();
     performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
     if (inLeftZone(x) == rtl) host.nextVolume();
     else host.previousVolume();
@@ -755,12 +763,11 @@ final class Reader extends View {
       touchAnchor = Math.max(0, Math.min(1, y / getHeight()));
       if (!skipTouch
           && longPressVolume
-          && zoom == 1
-          && host.overlay == null
+          && zoom <= 1.05f
           && !center(x)) {
         edgeLongPressArmed = true;
         edgeLongPressX = x;
-        postDelayed(edgeLongPress, LONG_PRESS_VOLUME_MS);
+        host.handler.postDelayed(edgeLongPress, LONG_PRESS_VOLUME_MS);
       }
     }
     if (skipTouch) return true;
@@ -776,14 +783,14 @@ final class Reader extends View {
       float dx = x - downX;
       float dy = y - downY;
       if (edgeLongPressArmed) {
-        float holdTol = host.dp(20);
+        float holdTol = host.dp(28);
         if (dx * dx + dy * dy > holdTol * holdTol) cancelEdgeLongPress();
       }
       if (!brightnessDrag
           && brightnessGesture
           && !drag
           && mode != 3
-          && zoom == 1
+          && zoom <= 1.05f
           && downX < getWidth() * .18f
           && Math.abs(dy) > host.dp(12)
           && Math.abs(dy) > Math.abs(dx) * 1.8f) {
@@ -802,21 +809,21 @@ final class Reader extends View {
         WindowManager.LayoutParams attrs = host.getWindow().getAttributes();
         attrs.screenBrightness = Math.max(.03f, Math.min(1, initialBrightness - dy / getHeight()));
         host.getWindow().setAttributes(attrs);
-      } else if (zoom > 1) {
+      } else if (zoom > 1.05f) {
         cancelEdgeLongPress();
         panX += x - lastX;
         panY += y - lastY;
         clampPan();
         invalidate();
       } else if (mode == 3) {
-        if (Math.abs(dy) > host.dp(16)) cancelEdgeLongPress();
+        if (Math.abs(dy) > host.dp(28)) cancelEdgeLongPress();
         advanceScroll(lastY - y);
       } else if (!panFit(x - lastX, y - lastY)
           && swipeTurn
           && (drag
               || Math.abs(dx) > ViewConfiguration.get(host).getScaledTouchSlop()
                   && Math.abs(dx) > Math.abs(dy))) {
-        if (!edgeLongPressArmed || Math.abs(dx) > host.dp(20)) {
+        if (!edgeLongPressArmed || Math.abs(dx) > host.dp(28)) {
           cancelEdgeLongPress();
           int dir = (rtl ? dx : -dx) > 0 ? 1 : -1;
           if (!drag) {

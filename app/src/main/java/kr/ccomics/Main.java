@@ -54,6 +54,8 @@ public final class Main extends Activity {
   FrameLayout frame;
   LinearLayout root;
   TextView scanBanner;
+  LinearLayout readerStatusBar;
+  TextView readerStatusText;
   GridView grid;
   ListView shelfList;
   StarSectionAdapter sectionAdapter;
@@ -1616,12 +1618,76 @@ public final class Main extends Activity {
   }
 
   void updateScanBanner() {
+    if (reader != null) {
+      updateReaderStatusBanner();
+      return;
+    }
+    hideReaderStatusBanner();
     if (scanBanner == null) return;
     if (scanMessage.isEmpty()) {
       scanBanner.setVisibility(View.GONE);
     } else {
       scanBanner.setText(scanMessage);
       scanBanner.setVisibility(View.VISIBLE);
+    }
+  }
+
+  /** 읽기 화면에서 다음·이전 권을 내려받거나 여는 동안 상단에 진행 배너와 취소 버튼을 띄운다. */
+  void updateReaderStatusBanner() {
+    if (frame == null || reader == null) {
+      hideReaderStatusBanner();
+      return;
+    }
+    if (scanMessage.isEmpty() || !loadingBook) {
+      hideReaderStatusBanner();
+      return;
+    }
+    if (readerStatusBar == null) {
+      LinearLayout bar = row();
+      bar.setClickable(true);
+      GradientDrawable bgPill = new GradientDrawable();
+      bgPill.setColor(0xe61c211e);
+      bgPill.setCornerRadius(dp(18));
+      bgPill.setStroke(dp(1), 0x33ffffff);
+      bar.setBackground(bgPill);
+      bar.setPadding(dp(14), dp(8), dp(8), dp(8));
+      bar.setElevation(dp(6));
+      TextView msg = label("", 13, 0xfff2f1e9, true);
+      one(msg);
+      msg.setMaxWidth(dp(280));
+      weight(bar, msg);
+      TextView cancelBtn = label("취소", 12, 0xffff8a80, true);
+      cancelBtn.setPadding(dp(10), dp(6), dp(10), dp(6));
+      cancelBtn.setOnClickListener(v -> cancelLoadingBook());
+      bar.addView(cancelBtn);
+      int safeTop = 0;
+      WindowInsetsCompat wi = ViewCompat.getRootWindowInsets(frame);
+      if (wi != null) {
+        Insets safe =
+            Insets.max(
+                wi.getInsets(
+                    WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()),
+                wi.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars()));
+        safeTop = safe.top;
+      }
+      FrameLayout.LayoutParams lp =
+          new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+      lp.topMargin = Math.max(dp(18), safeTop + dp(10));
+      lp.leftMargin = dp(16);
+      lp.rightMargin = dp(16);
+      frame.addView(bar, lp);
+      readerStatusBar = bar;
+      readerStatusText = msg;
+    }
+    readerStatusText.setText(scanMessage);
+    readerStatusBar.setVisibility(View.VISIBLE);
+  }
+
+  void hideReaderStatusBanner() {
+    if (readerStatusBar != null) {
+      if (frame != null) frame.removeView(readerStatusBar);
+      readerStatusBar = null;
+      readerStatusText = null;
     }
   }
 
@@ -4203,16 +4269,18 @@ public final class Main extends Activity {
         public void onDownloadProgress(int sessionId, String bannerText) {
           runOnUiThread(
               () -> {
-                if (isDestroyed() || sessionId != activeDownloadSession) return;
+                if (isDestroyed() || !DownloadService.isCurrentSession(sessionId)) return;
+                activeDownloadSession = sessionId;
                 scanMessage = bannerText;
-                if (reader == null) updateScanBanner();
+                updateScanBanner();
               });
         }
 
         public void onDownloadBookSaved(int sessionId, long bookId, boolean openNow) {
           runOnUiThread(
               () -> {
-                if (isDestroyed() || sessionId != activeDownloadSession) return;
+                if (isDestroyed() || !DownloadService.isCurrentSession(sessionId)) return;
+                activeDownloadSession = sessionId;
                 if (reader == null) refreshRemoteEntries();
                 if (openNow && bookId > 0 && db != null) {
                   Library.Book target = db.get(bookId);
@@ -4225,7 +4293,7 @@ public final class Main extends Activity {
             int sessionId, long openBookId, int completedCount, boolean batch) {
           runOnUiThread(
               () -> {
-                if (isDestroyed() || sessionId != activeDownloadSession) return;
+                if (isDestroyed() || !DownloadService.isCurrentSession(sessionId)) return;
                 activeDownloadSession = 0;
                 getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 if (batch) {
@@ -4254,7 +4322,7 @@ public final class Main extends Activity {
         public void onDownloadFailed(int sessionId, Exception e, boolean batch) {
           runOnUiThread(
               () -> {
-                if (isDestroyed() || sessionId != activeDownloadSession) return;
+                if (isDestroyed() || !DownloadService.isCurrentSession(sessionId)) return;
                 activeDownloadSession = 0;
                 loadingBook = false;
                 getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -4276,7 +4344,9 @@ public final class Main extends Activity {
         public void onDownloadCancelled(int sessionId) {
           runOnUiThread(
               () -> {
-                if (isDestroyed() || sessionId != activeDownloadSession) return;
+                if (isDestroyed()
+                    || (sessionId != activeDownloadSession
+                        && !DownloadService.isCurrentSession(sessionId))) return;
                 activeDownloadSession = 0;
                 loadingBook = false;
                 getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -4398,8 +4468,8 @@ public final class Main extends Activity {
     if (needDownload) {
       maybeRequestNotificationPermission();
       loadingBook = true;
-      scanMessage = "책을 여는 중…";
-      if (reader == null) updateScanBanner();
+      scanMessage = reader != null ? volumeTitle(b) + " 받는 중…" : "책을 여는 중…";
+      updateScanBanner();
       getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
       readerIO.execute(
           () -> {
@@ -4432,8 +4502,8 @@ public final class Main extends Activity {
       if (DownloadService.isWaitingToOpen()) abortActiveDownload();
     }
     loadingBook = true;
-    scanMessage = "책을 여는 중…";
-    if (reader == null) updateScanBanner();
+    scanMessage = reader != null ? volumeTitle(b) + " 여는 중…" : "책을 여는 중…";
+    updateScanBanner();
     openArchiveReady(b, token);
   }
 
@@ -4464,6 +4534,8 @@ public final class Main extends Activity {
                   shelfList = null;
                   sectionAdapter = null;
                   scanBanner = null;
+                  readerStatusBar = null;
+                  readerStatusText = null;
                   frame.removeAllViews();
                   reader = new Reader(this, a, b);
                   frame.addView(reader, -1, -1);
@@ -4804,7 +4876,11 @@ public final class Main extends Activity {
 
   List<Library.Book> seriesVolumesForReader(Library.Book current) {
     List<Library.Book> group = groups.get(current.grp);
-    if (group != null && !group.isEmpty()) return group;
+    if (group != null && !group.isEmpty()) {
+      for (int i = 0; i < group.size(); i++) {
+        if (group.get(i).id == current.id) return group;
+      }
+    }
     if (db == null || current.grp == null || current.grp.isEmpty()) return Collections.emptyList();
     List<Library.Book> loaded = new ArrayList<>();
     try (android.database.Cursor c =
@@ -4820,11 +4896,16 @@ public final class Main extends Activity {
   }
 
   void nextVolume() {
-    if (reader == null || DownloadService.isWaitingToOpen()) return;
+    if (reader == null) return;
     List<Library.Book> group = seriesVolumesForReader(reader.book);
     for (int i = 0; i + 1 < group.size(); i++)
       if (group.get(i).id == reader.book.id) {
         Library.Book next = group.get(i + 1);
+        if (DownloadService.waitingOpenBookId() == next.id) {
+          toast("이미 내려받는 중입니다.");
+          updateScanBanner();
+          return;
+        }
         if (prefs.getBoolean("autoNext", true)) open(next);
         else
           dialog()
@@ -4839,11 +4920,16 @@ public final class Main extends Activity {
   }
 
   void previousVolume() {
-    if (reader == null || DownloadService.isWaitingToOpen()) return;
+    if (reader == null) return;
     List<Library.Book> group = seriesVolumesForReader(reader.book);
     for (int i = 1; i < group.size(); i++)
       if (group.get(i).id == reader.book.id) {
         Library.Book prev = group.get(i - 1);
+        if (DownloadService.waitingOpenBookId() == prev.id) {
+          toast("이미 내려받는 중입니다.");
+          updateScanBanner();
+          return;
+        }
         if (prefs.getBoolean("autoNext", true)) open(prev);
         else
           dialog()
@@ -4861,6 +4947,7 @@ public final class Main extends Activity {
     closeSettings();
     closeTouchZoneEditor();
     cancelLoadingBook();
+    hideReaderStatusBanner();
     String closedGrp = reader.book.grp;
     reader.close();
     reader = null;
@@ -4887,7 +4974,7 @@ public final class Main extends Activity {
       activeDownloadSession = DownloadService.activeSessionId();
       loadingBook = true;
       scanMessage = DownloadService.currentBanner();
-      if (reader == null) updateScanBanner();
+      updateScanBanner();
       getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     } else {
       if (loadingBook && activeDownloadSession > 0) {
@@ -4897,12 +4984,12 @@ public final class Main extends Activity {
       }
       scanMessage =
           DownloadService.isScanning() ? DownloadService.currentScanBanner() : "";
-      if (reader == null) updateScanBanner();
+      updateScanBanner();
       if (DownloadService.consumePendingRefresh() && reader == null && db != null) {
         refreshRemoteEntries();
       }
       long openId = DownloadService.consumePendingOpenBookId();
-      if (openId > 0 && reader == null && db != null) {
+      if (openId > 0 && db != null && (reader == null || reader.book.id != openId)) {
         Library.Book doneBook = db.get(openId);
         if (doneBook != null && RemoteBooks.has(this, doneBook.url)) open(doneBook);
       }

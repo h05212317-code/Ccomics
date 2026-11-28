@@ -278,7 +278,7 @@ public class ReaderFrameTest {
     assertFalse(reader.handleLongPress(offPress));
     offPress.recycle();
 
-    // 실제 터치에서 미세 흔들림(12dp)이 있어도 450ms 뒤 정상 동작하고, 큰 스와이프(30dp)는 취소된다.
+    // 실제 터치에서 미세 흔들림(12dp)이 있어도 400ms 뒤 정상 동작하고, 큰 스와이프(36dp)는 취소된다.
     host.prefs.edit().putBoolean("longPressVolume", true).apply();
     reader.readGestures();
     long t = android.os.SystemClock.uptimeMillis();
@@ -292,10 +292,88 @@ public class ReaderFrameTest {
     wiggle.recycle();
     assertTrue("slight thumb wiggle should not cancel edge long press", reader.edgeLongPressArmed);
     android.view.MotionEvent bigMove =
-        android.view.MotionEvent.obtain(t, t + 150, 2, 100f + host.dp(30), 800f, 0);
+        android.view.MotionEvent.obtain(t, t + 150, 2, 100f + host.dp(36), 800f, 0);
     reader.onTouchEvent(bigMove);
     bigMove.recycle();
     assertFalse("intentional swipe should cancel edge long press", reader.edgeLongPressArmed);
+  }
+
+  @Test
+  public void longPressWorksAfterSeekBarMoveBothWithOverlayOpenAndClosed() {
+    host.reader = reader;
+    host.frame = new android.widget.FrameLayout(host);
+    host.frame.addView(reader, -1, -1);
+    int width = host.dp(320), screenHeight = host.dp(600);
+    host.frame.measure(
+        android.view.View.MeasureSpec.makeMeasureSpec(width, 1073741824),
+        android.view.View.MeasureSpec.makeMeasureSpec(screenHeight, 1073741824));
+    host.frame.layout(0, 0, width, screenHeight);
+    host.prefs.edit().putBoolean("autoNext", false).putBoolean("longPressVolume", true).apply();
+    reader.readGestures();
+    reader.rtl = true;
+
+    host.db.exec("UPDATE books SET title='탐색 2권',grp='series:seeklp' WHERE id=1");
+    host.db.exec("INSERT INTO books(id,title,grp) VALUES(101,'탐색 1권','series:seeklp')");
+    host.db.exec("INSERT INTO books(id,title,grp) VALUES(103,'탐색 3권','series:seeklp')");
+    reader.book.grp = "series:seeklp";
+    // groups에 현재 권이 빠져 있어도 DB 폴백으로 시리즈 전권을 찾아야 한다.
+    host.groups.put("series:seeklp", java.util.Collections.singletonList(host.db.get(103)));
+
+    // 1. 탐색바 열기 -> 탐색바로 페이지 이동 -> 메뉴 바가 열린 상태(overlay != null)에서 곧장 왼쪽 꾹 누르기
+    host.toggleReaderMenu();
+    assertNotNull(host.overlay);
+    android.view.ViewGroup bar = (android.view.ViewGroup) host.seek.getParent();
+    bar.measure(
+        android.view.View.MeasureSpec.makeMeasureSpec(width, 1073741824),
+        android.view.View.MeasureSpec.makeMeasureSpec(host.dp(60), 1073741824));
+    bar.layout(0, 0, width, host.dp(60));
+    float sx = host.seek.getLeft() + host.seek.getWidth() * .25f;
+    float sy = host.seek.getTop() + host.seek.getHeight() / 2f;
+    long t = android.os.SystemClock.uptimeMillis();
+    for (int action : new int[] {0, 1}) {
+      android.view.MotionEvent ev =
+          android.view.MotionEvent.obtain(t, t + action * 10, action, sx, sy, 0);
+      bar.dispatchTouchEvent(ev);
+      ev.recycle();
+    }
+    assertTrue("seekbar should move page", reader.page > 0);
+    assertNotNull("overlay remains open after seekbar", host.overlay);
+
+    // 메뉴 바가 열린 채로 왼쪽 가장자리 꾹 누르기 -> 메뉴 닫히고 다음 권 동작
+    long t2 = t + 100;
+    touch(t2, t2, 0, width * 0.1f, screenHeight * 0.5f);
+    assertTrue("long press should arm even while overlay is open", reader.edgeLongPressArmed);
+    org.robolectric.shadows.ShadowLooper.idleMainLooper(
+        Reader.LONG_PRESS_VOLUME_MS + 20, java.util.concurrent.TimeUnit.MILLISECONDS);
+    touch(t2, t2 + Reader.LONG_PRESS_VOLUME_MS + 30, 1, width * 0.1f, screenHeight * 0.5f);
+    assertNull("long press should dismiss overlay", host.overlay);
+    android.app.AlertDialog nextDlg = org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog();
+    assertNotNull(nextDlg);
+    assertEquals("탐색 3권", org.robolectric.Shadows.shadowOf(nextDlg).getMessage().toString());
+    nextDlg.dismiss();
+
+    // 2. 미세 확대 잔여(1.03f) 상태에서도 오른쪽 가장자리 꾹 누르기 -> 이전 권 동작
+    reader.zoom = 1.03f;
+    long t3 = t2 + 1000;
+    touch(t3, t3, 0, width * 0.9f, screenHeight * 0.5f);
+    assertTrue(reader.edgeLongPressArmed);
+    org.robolectric.shadows.ShadowLooper.idleMainLooper(
+        Reader.LONG_PRESS_VOLUME_MS + 20, java.util.concurrent.TimeUnit.MILLISECONDS);
+    touch(t3, t3 + Reader.LONG_PRESS_VOLUME_MS + 30, 1, width * 0.9f, screenHeight * 0.5f);
+    android.app.AlertDialog prevDlg = org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog();
+    assertNotNull(prevDlg);
+    assertEquals("탐색 1권", org.robolectric.Shadows.shadowOf(prevDlg).getMessage().toString());
+    prevDlg.dismiss();
+
+    // 3. 읽기 화면 로딩 중 상단 진행 배너 표시 및 취소 시 숨김 확인
+    host.loadingBook = true;
+    host.scanMessage = "탐색 3권 받는 중…";
+    host.updateScanBanner();
+    assertNotNull(host.readerStatusBar);
+    assertEquals(android.view.View.VISIBLE, host.readerStatusBar.getVisibility());
+    assertEquals("탐색 3권 받는 중…", host.readerStatusText.getText().toString());
+    host.cancelLoadingBook();
+    assertNull(host.readerStatusBar);
   }
 
   @Test

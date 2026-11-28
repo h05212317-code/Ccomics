@@ -114,6 +114,7 @@ public final class DownloadService extends Service {
 
   private static volatile DownloadService instance;
   private static volatile Session active;
+  private static volatile int lastValidSessionId;
   private static volatile Listener listener;
   private static volatile long pendingOpenBookId;
   private static volatile boolean pendingRefresh;
@@ -269,6 +270,19 @@ public final class DownloadService extends Service {
     }
   }
 
+  static long waitingOpenBookId() {
+    synchronized (LOCK) {
+      return active != null && active.running ? active.openBookId : 0L;
+    }
+  }
+
+  static boolean isCurrentSession(int sessionId) {
+    if (sessionId <= 0) return false;
+    synchronized (LOCK) {
+      return (active != null && active.id == sessionId) || lastValidSessionId == sessionId;
+    }
+  }
+
   static int activeSessionId() {
     synchronized (LOCK) {
       return active != null && active.running ? active.id : 0;
@@ -318,6 +332,7 @@ public final class DownloadService extends Service {
       if (cur != null && cur.running && !cur.stopAll) {
         String outer = target.outerUrl();
         cur.openBookId = target.bookId;
+        lastValidSessionId = cur.id;
         if (cur.current != null && outer.equals(cur.current.outerUrl())) {
           // 이미 지금 받고 있는 책이면 그대로 끝까지 받고 열기만 연결한다.
           return cur.id;
@@ -376,6 +391,7 @@ public final class DownloadService extends Service {
       Session cur = active;
       if (cur != null && cur.running && !cur.stopAll) {
         cur.batchMode = true;
+        lastValidSessionId = cur.id;
         for (Target t : targets) {
           if (RemoteBooks.has(appCtx, t.url)) continue;
           if (!cur.containsOuterLocked(t.outerUrl())) {
@@ -426,6 +442,7 @@ public final class DownloadService extends Service {
     session.notifText = first.title.isEmpty() ? "다운로드 준비 중…" : first.title;
     session.bannerText = batch ? "미리 받기를 시작합니다…" : "책을 여는 중…";
     active = session;
+    lastValidSessionId = sid;
     return session;
   }
 
@@ -460,6 +477,7 @@ public final class DownloadService extends Service {
     synchronized (LOCK) {
       prev = active;
       pendingOpenBookId = 0L;
+      lastValidSessionId = 0;
       if (prev != null) {
         prev.stopAll = true;
         prev.running = false;
