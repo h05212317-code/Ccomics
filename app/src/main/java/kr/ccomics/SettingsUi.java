@@ -345,8 +345,23 @@ final class SettingsUi {
     return total;
   }
 
+  static long coverCacheBytes(android.content.Context ctx) {
+    long total = 0;
+    java.io.File filesDir = ctx.getFilesDir();
+    if (filesDir != null) {
+      java.io.File coversDir = new java.io.File(filesDir, "covers");
+      java.io.File[] files = coversDir.listFiles();
+      if (files != null) for (java.io.File f : files) if (f.isFile()) total += f.length();
+    }
+    return total;
+  }
+
   private long tempCacheBytes() {
     return tempCacheBytes(host);
+  }
+
+  private long coverCacheBytes() {
+    return coverCacheBytes(host);
   }
 
   private String appVersionLabel() {
@@ -487,7 +502,7 @@ final class SettingsUi {
           addActionRow(
               storageCard,
               "임시 파일 정리",
-              "표지 썸네일·스트리밍 임시 캐시만 비웁니다 (저장본 유지)",
+              "스트리밍·압축 임시 파일만 비웁니다 (저장본·표지 유지)",
               tempBadge,
               () -> {
                 long curBytes = tempCacheBytes();
@@ -512,6 +527,48 @@ final class SettingsUi {
                                       () -> {
                                         if (host.isDestroyed()) return;
                                         host.toast("임시 파일을 정리했습니다.");
+                                        host.refreshSettingsView();
+                                      });
+                                }))
+                    .setNegativeButton("취소", null)
+                    .show();
+              });
+
+          long coverBytes = coverCacheBytes();
+          String coverBadge = coverBytes > 0 ? RemoteBooks.formatSize(coverBytes) : "비어 있음";
+          addActionRow(
+              storageCard,
+              "표지 캐시 삭제",
+              "서재 표지 썸네일을 모두 지웁니다 (새로고침 시 다시 생성)",
+              coverBadge,
+              () -> {
+                long curBytes = coverCacheBytes();
+                String msg =
+                    curBytes > 0
+                        ? "표지 캐시 ("
+                            + RemoteBooks.formatSize(curBytes)
+                            + ")을 삭제하시겠습니까?\n다시 표시하려면 연결 폴더를 새로고침해야 하며, 원격 책은 표지를 다시 내려받습니다."
+                        : "표지 캐시를 삭제하시겠습니까?\n다시 표시하려면 연결 폴더를 새로고침해야 합니다.";
+                host.dialog()
+                    .setTitle("표지 캐시 삭제")
+                    .setMessage(msg)
+                    .setPositiveButton(
+                        "확인",
+                        (d, w) ->
+                            host.worker.execute(
+                                () -> {
+                                  java.io.File[] covers =
+                                      host.db != null ? host.db.covers.listFiles() : null;
+                                  if (covers != null) {
+                                    for (java.io.File f : covers) if (f.isFile()) f.delete();
+                                  }
+                                  host.coverCache.evictAll();
+                                  if (host.db != null) host.db.coverVersions.clear();
+                                  host.runOnUiThread(
+                                      () -> {
+                                        if (host.isDestroyed()) return;
+                                        host.settingsDirty = true;
+                                        host.toast("표지 캐시를 삭제했습니다.");
                                         host.refreshSettingsView();
                                       });
                                 }))

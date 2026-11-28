@@ -250,6 +250,33 @@ public class SettingsUiTest {
       assertEquals("확인", dlg.getButton(android.content.DialogInterface.BUTTON_POSITIVE).getText());
       assertEquals("취소", dlg.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).getText());
       dlg.dismiss();
+
+      // 표지 캐시 삭제도 용량 배지 및 확인/취소 다이얼로그를 표시한다.
+      java.io.File coverDummy = new java.io.File(lib.covers, "999.jpg");
+      try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(coverDummy, "rw")) {
+        raf.setLength(1536L << 10); // 1.5MB
+      }
+      host.refreshSettingsView();
+      assertEquals(1536L << 10, SettingsUi.coverCacheBytes(host));
+      assertNotNull(findText(host.settingsOverlay, "1.5MB"));
+
+      TextView coverRowTitle = findText(host.settingsOverlay, "표지 캐시 삭제");
+      assertNotNull(coverRowTitle);
+      ((View) coverRowTitle.getParent().getParent()).performClick();
+
+      android.app.AlertDialog coverDlg =
+          org.robolectric.shadows.ShadowAlertDialog.getLatestAlertDialog();
+      assertNotNull(coverDlg);
+      assertTrue(coverDlg.isShowing());
+      String coverMsg = org.robolectric.Shadows.shadowOf(coverDlg).getMessage().toString();
+      assertTrue(coverMsg.contains("1.5MB"));
+      assertTrue(coverMsg.contains("삭제하시겠습니까"));
+      assertEquals(
+          "확인", coverDlg.getButton(android.content.DialogInterface.BUTTON_POSITIVE).getText());
+      assertEquals(
+          "취소", coverDlg.getButton(android.content.DialogInterface.BUTTON_NEGATIVE).getText());
+      coverDlg.dismiss();
+      coverDummy.delete();
     } finally {
       WebDav.Cache.clear(host);
     }
