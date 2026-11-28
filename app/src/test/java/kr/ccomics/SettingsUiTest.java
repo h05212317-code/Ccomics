@@ -155,4 +155,67 @@ public class SettingsUiTest {
       assertEquals(host.dp(640), wideContent.getLayoutParams().width);
     }
   }
+
+  @Test
+  public void bookManageAndVolumePickerDistinguishPartialCacheAndSelectAll() throws Exception {
+    Main host = Robolectric.buildActivity(Main.class).get();
+    host.prefs = host.getSharedPreferences("book-manage-ui-test", 0);
+    host.prefs.edit().clear().apply();
+    host.frame = new FrameLayout(host);
+    host.setContentView(host.frame);
+    host.theme();
+    RemoteBooks.clear(host);
+    try (Library lib = new Library(host)) {
+      host.db = lib;
+      String u1 = "https://dav.pikpak.ai/conan/1.zip";
+      String u2 = "https://dav.pikpak.ai/conan/2.zip";
+      String u3 = "https://dav.pikpak.ai/conan/3.zip";
+      lib.exec("INSERT INTO sources(id,url,user,secret) VALUES(1,'https://dav.pikpak.ai/conan/','u','')");
+      lib.exec(
+          "INSERT INTO books(source,url,title,series,grp,size,changed,seen,pages) VALUES"
+              + "(1,?,'명탐정 코난 1권','명탐정 코난','series:conan',100000000,1,1,180),"
+              + "(1,?,'명탐정 코난 2권','명탐정 코난','series:conan',100000000,1,1,180),"
+              + "(1,?,'명탐정 코난 3권','명탐정 코난','series:conan',100000000,1,1,180)",
+          u1,
+          u2,
+          u3);
+      List<Library.Book> books = lib.books();
+      host.books = books;
+      host.groups.put("series:conan", books);
+
+      // 1권은 완료 저장, 2권은 미완료(.part만 존재), 3권은 미보관
+      assertTrue(RemoteBooks.file(host, u1).createNewFile());
+      assertTrue(new java.io.File(RemoteBooks.file(host, u2).getPath() + ".part").createNewFile());
+      assertEquals(100, RemoteBooks.partialPercent(host, u1));
+      assertEquals(0, RemoteBooks.partialPercent(host, u2));
+      assertEquals(-1, RemoteBooks.partialPercent(host, u3));
+
+      // 2권 상세에서 꾹 누르기 -> '미완료 캐시 지우기'로 구분 표시되어야 함
+      host.selected = "series:conan";
+      host.manage(books.get(1));
+      assertEquals(Main.SETTINGS_BOOK_MANAGE, host.settingsPage);
+      List<String> texts = new ArrayList<>();
+      collectTexts(host.settingsOverlay, texts);
+      assertTrue(texts.contains("원격 보관함 · 미리 받기"));
+      assertTrue(texts.contains("미완료 캐시 지우기"));
+      assertTrue(texts.contains("여러 권 선택해서 받기"));
+      assertTrue(texts.contains("이 시리즈 전체 미리 받기"));
+
+      // 여러 권 선택 화면 진입 -> '미보관 전체' 누르면 2권·3권(2권) 선택됨
+      host.openVolumeDownloadPicker(books.get(1), true);
+      assertEquals(Main.SETTINGS_VOLUME_PICKER, host.settingsPage);
+      TextView allChip = findText(host.settingsOverlay, "미보관 전체");
+      assertNotNull(allChip);
+      allChip.performClick();
+      assertNotNull(findText(host.settingsOverlay, "2권 선택"));
+
+      // 뒤로가기 2번: 권 선택 -> 권 관리 -> 닫힘
+      host.onBackPressed();
+      assertEquals(Main.SETTINGS_BOOK_MANAGE, host.settingsPage);
+      host.onBackPressed();
+      assertEquals(Main.SETTINGS_NONE, host.settingsPage);
+    } finally {
+      RemoteBooks.clear(host);
+    }
+  }
 }

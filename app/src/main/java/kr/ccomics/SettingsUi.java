@@ -176,6 +176,17 @@ final class SettingsUi {
 
   private void addActionRow(
       LinearLayout card, String title, String subtitle, String badge, Runnable onClick) {
+    addActionRow(card, title, subtitle, badge, host.ink, host.accent, onClick);
+  }
+
+  private void addActionRow(
+      LinearLayout card,
+      String title,
+      String subtitle,
+      String badge,
+      int titleColor,
+      int badgeColor,
+      Runnable onClick) {
     addDividerIfNeeded(card);
     LinearLayout row = host.row();
     row.setPadding(host.dp(16), host.dp(13), host.dp(12), host.dp(13));
@@ -184,7 +195,7 @@ final class SettingsUi {
     row.setOnClickListener(v -> onClick.run());
 
     LinearLayout textCol = host.col();
-    TextView titleView = host.label(title, 15, host.ink, true);
+    TextView titleView = host.label(title, 15, titleColor, true);
     textCol.addView(titleView);
     if (subtitle != null && !subtitle.isEmpty()) {
       TextView subView = host.label(subtitle, 12, host.muted, false);
@@ -196,7 +207,7 @@ final class SettingsUi {
     host.weight(row, textCol);
 
     if (badge != null && !badge.isEmpty()) {
-      TextView b = host.label(badge, 12, host.accent, true);
+      TextView b = host.label(badge, 12, badgeColor, true);
       b.setPadding(host.dp(9), host.dp(4), host.dp(9), host.dp(4));
       b.setBackground(pillShape(trackBg(), 12));
       LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-2, -2);
@@ -932,5 +943,656 @@ final class SettingsUi {
           host.prefs.edit().putBoolean(key, on).apply();
           r.readGestures();
         });
+  }
+
+  /** 4) 책 · 작품 길게 누르기 관리 화면 (설정 화면과 동일한 카드 섹션형 UI, 일반·와이드모드 대응). */
+  View buildBookManageSettings(Library.Book b, boolean inSeriesDetail, int scrollY) {
+    List<Library.Book> group = host.groups.getOrDefault(b.grp, Collections.singletonList(b));
+    String seriesName = host.seriesDisplayName(b.grp, group);
+    String screenTitle = inSeriesDetail ? host.volumeTitle(b) : seriesName;
+
+    List<Library.Book> remoteGroupBooks = new ArrayList<>();
+    List<Library.Book> uncachedSeriesFiles = new ArrayList<>();
+    Set<String> seenUncachedOuter = new HashSet<>();
+    LinkedHashSet<String> seriesCacheFiles = new LinkedHashSet<>();
+    long seriesCachedBytes = 0;
+    int seriesCompleteCount = 0, seriesPartialCount = 0, uncachedSeriesVolumes = 0;
+    for (Library.Book item : group) {
+      if (!WebDav.isUrl(item.url)) continue;
+      remoteGroupBooks.add(item);
+      boolean complete = RemoteBooks.has(host, item.url);
+      boolean hasAny = RemoteBooks.hasAny(host, item.url);
+      if (complete) seriesCompleteCount++;
+      else {
+        uncachedSeriesVolumes++;
+        if (hasAny) seriesPartialCount++;
+        if (seenUncachedOuter.add(RemoteBooks.outer(item.url))) uncachedSeriesFiles.add(item);
+      }
+      if (hasAny) {
+        String fn = RemoteBooks.fileName(item.url);
+        if (seriesCacheFiles.add(fn)) seriesCachedBytes += RemoteBooks.itemBytes(host, item.url);
+      }
+    }
+
+    int singlePct = WebDav.isUrl(b.url) ? RemoteBooks.partialPercent(host, b.url) : -1;
+    boolean singleComplete = singlePct == 100;
+    boolean singlePartial = singlePct >= 0 && singlePct < 100;
+    long singleCacheBytes = WebDav.isUrl(b.url) ? RemoteBooks.itemBytes(host, b.url) : 0;
+    boolean singleQueued = WebDav.isUrl(b.url) && DownloadService.isQueuedOrDownloading(b.url);
+
+    final long fSeriesCachedBytes = seriesCachedBytes;
+    final int fSeriesCompleteCount = seriesCompleteCount;
+    final int fSeriesPartialCount = seriesPartialCount;
+    final int fUncachedSeriesVolumes = uncachedSeriesVolumes;
+
+    return shell(
+        inSeriesDetail ? "권 관리" : "작품 관리",
+        host::closeSettings,
+        null,
+        content -> {
+          // ── 상단 책/작품 요약 카드 ──
+          LinearLayout summary = host.row();
+          summary.setBackground(cardShape());
+          summary.setPadding(host.dp(14), host.dp(14), host.dp(16), host.dp(14));
+          LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-1, -2);
+          slp.topMargin = host.dp(6);
+          summary.setLayoutParams(slp);
+
+          ImageView thumb = new ImageView(host);
+          thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+          thumb.setBackground(pillShape(trackBg(), 6));
+          thumb.setClipToOutline(true);
+          host.loadCover(thumb, b);
+          LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(host.dp(48), host.dp(68));
+          tlp.rightMargin = host.dp(14);
+          summary.addView(thumb, tlp);
+
+          LinearLayout meta = host.col();
+          TextView tTitle = host.label(screenTitle, 16, host.ink, true);
+          tTitle.setMaxLines(2);
+          tTitle.setEllipsize(TextUtils.TruncateAt.END);
+          meta.addView(tTitle);
+
+          StringBuilder metaLine = new StringBuilder();
+          if (inSeriesDetail) {
+            if (b.pages > 0) metaLine.append(b.pages).append("쪽");
+            if (WebDav.isUrl(b.url)) {
+              if (metaLine.length() > 0) metaLine.append("  ·  ");
+              if (singleComplete) metaLine.append("휴대폰 보관됨");
+              else if (singleQueued) metaLine.append("다운로드 대기열");
+              else if (singlePartial) metaLine.append("미완료 ").append(singlePct).append("%");
+              else metaLine.append(WebDav.isPikPak(b.url) ? "PikPak 원격" : "PC 원격");
+            } else {
+              if (metaLine.length() > 0) metaLine.append("  ·  ");
+              metaLine.append("기기 저장소");
+            }
+          } else {
+            metaLine.append("총 ").append(group.size()).append("권");
+            if (!remoteGroupBooks.isEmpty()) {
+              metaLine.append("  ·  보관함 ").append(fSeriesCompleteCount).append("/").append(remoteGroupBooks.size()).append("권");
+            }
+            if (!b.shelf.isEmpty()) metaLine.append("  ·  ").append(b.shelf);
+          }
+          TextView tSub = host.label(metaLine.toString(), 12, host.muted, false);
+          tSub.setPadding(0, host.dp(5), 0, 0);
+          meta.addView(tSub);
+          host.weight(summary, meta);
+          content.addView(summary);
+
+          // ── 1. 원격 보관함 · 미리 받기 ──
+          if (!remoteGroupBooks.isEmpty()) {
+            LinearLayout cacheCard = section(content, "원격 보관함 · 미리 받기");
+
+            if (inSeriesDetail && WebDav.isUrl(b.url)) {
+              if (!singleComplete) {
+                if (singleQueued) {
+                  addActionRow(
+                      cacheCard,
+                      "다운로드 대기열에 등록됨",
+                      "진행 중인 받기가 끝나면 순서대로 자동 저장됩니다",
+                      "대기 중",
+                      host.ink,
+                      host.accent,
+                      () -> host.toast("이미 다운로드 중이거나 대기열에 있습니다."));
+                } else {
+                  String dlTitle = singlePartial ? "이 권 이어서 미리 받기" : "이 권 미리 받기";
+                  String dlBadge =
+                      singlePartial
+                          ? singlePct + "%"
+                          : (b.size > 0 ? RemoteBooks.formatSize(b.size) : null);
+                  addActionRow(
+                      cacheCard,
+                      dlTitle,
+                      "다른 권을 받는 중이면 취소하지 않고 대기열에 이어서 추가합니다",
+                      dlBadge,
+                      () -> {
+                        host.closeSettings();
+                        host.prefetchRemoteBooks(Collections.singletonList(b));
+                      });
+                }
+              }
+
+              if (remoteGroupBooks.size() > 1) {
+                addActionRow(
+                    cacheCard,
+                    "여러 권 선택해서 받기",
+                    "원하는 권만 골라 백그라운드 대기열에 한 번에 추가합니다",
+                    "총 " + remoteGroupBooks.size() + "권",
+                    () -> host.openVolumeDownloadPicker(b, true));
+              }
+
+              if (uncachedSeriesFiles.size() > 1) {
+                addActionRow(
+                    cacheCard,
+                    "이 시리즈 전체 미리 받기",
+                    "미보관 " + fUncachedSeriesVolumes + "권 모두 백그라운드 대기열에 추가합니다",
+                    fUncachedSeriesVolumes + "권",
+                    () -> {
+                      host.closeSettings();
+                      host.prefetchRemoteBooks(uncachedSeriesFiles);
+                    });
+              }
+
+              if (singleComplete || singlePartial) {
+                String delTitle = singleComplete ? "원격 보관함에서 삭제" : "미완료 캐시 지우기";
+                String delSub =
+                    singleComplete
+                        ? "휴대폰 저장본만 지우며 원본 파일은 유지됩니다"
+                        : "받다가 중단된 임시 조각(" + singlePct + "%)만 지웁니다";
+                addActionRow(
+                    cacheCard,
+                    delTitle,
+                    delSub,
+                    RemoteBooks.formatSize(singleCacheBytes),
+                    dangerColor(),
+                    dangerColor(),
+                    () ->
+                        host.confirmDeleteBookCache(
+                            host.volumeTitle(b),
+                            Collections.singletonList(RemoteBooks.fileName(b.url)),
+                            singleCacheBytes,
+                            !singleComplete));
+              }
+            } else {
+              // 메인 책장(시리즈 꾹 누르기)
+              if (!uncachedSeriesFiles.isEmpty()) {
+                addActionRow(
+                    cacheCard,
+                    "전체 미리 받기",
+                    "미보관 " + fUncachedSeriesVolumes + "권을 백그라운드 대기열에 모두 추가합니다",
+                    fUncachedSeriesVolumes + "권",
+                    () -> {
+                      host.closeSettings();
+                      host.prefetchRemoteBooks(uncachedSeriesFiles);
+                    });
+              } else {
+                addActionRow(
+                    cacheCard,
+                    "모든 권이 보관함에 저장됨",
+                    "오프라인에서도 전체 " + remoteGroupBooks.size() + "권을 바로 읽을 수 있습니다",
+                    "완료",
+                    host.ink,
+                    host.remoteCachedColor(),
+                    () -> {});
+              }
+
+              if (remoteGroupBooks.size() > 1) {
+                addActionRow(
+                    cacheCard,
+                    "원하는 권 선택해서 받기",
+                    "받을 권만 골라 백그라운드 대기열에 추가합니다",
+                    "총 " + remoteGroupBooks.size() + "권",
+                    () -> host.openVolumeDownloadPicker(b, false));
+              }
+
+              if (!seriesCacheFiles.isEmpty()) {
+                String delTitle =
+                    fSeriesCompleteCount > 0 ? "이 작품 보관함 비우기" : "이 작품 미완료 캐시 지우기";
+                String delSub;
+                if (fSeriesCompleteCount > 0 && fSeriesPartialCount > 0) {
+                  delSub =
+                      "완료 " + fSeriesCompleteCount + "권 · 미완료 " + fSeriesPartialCount + "권 (원본 유지)";
+                } else if (fSeriesCompleteCount > 0) {
+                  delSub = "완료 " + fSeriesCompleteCount + "권 · 휴대폰 저장본만 삭제합니다";
+                } else {
+                  delSub = "받다 만 미완료 파일 " + fSeriesPartialCount + "건만 정리합니다";
+                }
+                addActionRow(
+                    cacheCard,
+                    delTitle,
+                    delSub,
+                    RemoteBooks.formatSize(fSeriesCachedBytes),
+                    dangerColor(),
+                    dangerColor(),
+                    () ->
+                        host.confirmDeleteBookCache(
+                            seriesName,
+                            seriesCacheFiles,
+                            fSeriesCachedBytes,
+                            fSeriesCompleteCount == 0));
+              }
+            }
+          }
+
+          // ── 2. 읽기 상태 · 평가 ──
+          LinearLayout stateCard = section(content, "읽기 상태 · 평가");
+
+          int curRating = host.groupRating(b.grp);
+          addSegmentRow(
+              stateCard,
+              "별점",
+              null,
+              new String[] {"없음", "★1", "★2", "★3", "★4", "★5"},
+              Math.max(0, Math.min(5, curRating)),
+              next -> {
+                host.db.exec("UPDATE books SET rating=? WHERE grp=?", next, b.grp);
+                for (Library.Book item : group) item.rating = next;
+                host.rebuildEntry(b.grp);
+                host.settingsDirty = true;
+              });
+
+          addSwitchRow(
+              stateCard,
+              "즐겨찾기",
+              inSeriesDetail ? "이 권을 즐겨찾기에 표시합니다" : "이 작품을 즐겨찾기에 표시합니다",
+              b.fav,
+              on -> {
+                b.fav = on;
+                host.db.exec("UPDATE books SET fav=? WHERE id=?", on ? 1 : 0, b.id);
+                host.rebuildEntry(b.grp);
+                host.settingsDirty = true;
+              });
+
+          addSwitchRow(
+              stateCard,
+              "완독으로 표시",
+              "끄면 읽던 페이지를 처음으로 초기화합니다",
+              b.done,
+              on -> {
+                boolean wasDone = b.done;
+                b.done = on;
+                if (wasDone && !on) {
+                  b.opened = 0;
+                  b.page = 0;
+                }
+                host.db.exec(
+                    "UPDATE books SET done=?,opened=CASE WHEN ? THEN 0 ELSE opened END,page=CASE"
+                        + " WHEN ? THEN 0 ELSE page END WHERE id=?",
+                    on ? 1 : 0,
+                    wasDone && !on ? 1 : 0,
+                    wasDone && !on ? 1 : 0,
+                    b.id);
+                host.rebuildEntry(b.grp);
+                host.settingsDirty = true;
+              });
+
+          addActionRow(
+              stateCard,
+              "책장에 배치",
+              "이 작품을 원하는 책장 분류에 넣습니다",
+              b.shelf.isEmpty() ? "미지정" : b.shelf,
+              () -> host.assignBookShelf(b));
+
+          // ── 3. 표지 · 시리즈 정리 ──
+          LinearLayout orgCard = section(content, "표지 · 시리즈 정리");
+
+          addActionRow(
+              orgCard,
+              "표지 변경",
+              "책 안의 다른 페이지를 표지로 고릅니다",
+              null,
+              () -> {
+                host.closeSettings();
+                host.chooseCover(b);
+              });
+
+          addActionRow(
+              orgCard,
+              "시리즈 대표 표지로 지정",
+              "서재 목록에 이 권의 표지를 대표로 표시합니다",
+              null,
+              () -> {
+                host.db.exec("UPDATE books SET rep=(id=?) WHERE grp=?", b.id, b.grp);
+                for (Library.Book item : group) item.rep = (item.id == b.id);
+                host.rebuildEntry(b.grp);
+                host.settingsDirty = true;
+                host.toast("시리즈 대표 표지로 지정했습니다.");
+              });
+
+          addActionRow(
+              orgCard,
+              "시리즈명 변경",
+              "서재에 표시되는 작품 이름을 직접 수정합니다",
+              null,
+              () -> host.renameSeriesDialog(b));
+
+          addActionRow(
+              orgCard,
+              "다른 시리즈에 합치기",
+              "이 시리즈의 모든 권을 다른 작품으로 병합합니다",
+              null,
+              () -> host.mergeSeriesDialog(b));
+
+          addActionRow(
+              orgCard,
+              "이 권을 별도 시리즈로 분리",
+              "선택한 권만 따로 독립된 작품으로 나눕니다",
+              null,
+              () -> host.splitVolumeFromSeries(b));
+        },
+        scrollY);
+  }
+
+  /** 5) 여러 권 선택해서 미리 받기 화면 (빠른 선택 칩 + 권별 체크리스트 + 하단 고정 실행 버튼). */
+  View buildVolumePickerSettings(Library.Book anchor, boolean fromDetail, int scrollY) {
+    List<Library.Book> group = host.groups.getOrDefault(anchor.grp, Collections.singletonList(anchor));
+    String seriesName = host.seriesDisplayName(anchor.grp, group);
+    List<Library.Book> remoteVolumes = new ArrayList<>();
+    for (Library.Book item : group) if (WebDav.isUrl(item.url)) remoteVolumes.add(item);
+
+    int anchorIdx = -1;
+    for (int i = 0; i < remoteVolumes.size(); i++) {
+      if (remoteVolumes.get(i).id == anchor.id) {
+        anchorIdx = i;
+        break;
+      }
+    }
+    final int fAnchorIdx = anchorIdx;
+
+    // 초기 선택: 권 상세에서 들어왔고 해당 권이 미보관이면 그 권 1권만 기본 체크
+    final Set<Long> selectedIds = new LinkedHashSet<>();
+    if (fromDetail
+        && fAnchorIdx >= 0
+        && !RemoteBooks.has(host, anchor.url)
+        && !DownloadService.isQueuedOrDownloading(anchor.url)) {
+      selectedIds.add(anchor.id);
+    }
+
+    int screenW = host.getResources().getConfiguration().screenWidthDp;
+    boolean wide = screenW >= 680;
+    int colWidth = wide ? host.dp(640) : ViewGroup.LayoutParams.MATCH_PARENT;
+    int hPad = host.dp(wide ? 24 : (screenW >= 600 ? 20 : 16));
+
+    LinearLayout root = host.col();
+    root.setBackgroundColor(host.bg);
+    root.setClickable(true);
+    root.setFocusable(true);
+
+    // 상단 바
+    LinearLayout bar = host.row();
+    bar.setPadding(host.dp(8), host.dp(8), host.dp(14), host.dp(8));
+    bar.setMinimumHeight(host.dp(56));
+    ToolsIcon backBtn = new ToolsIcon(host, "back", host.ink, "뒤로");
+    backBtn.setOnClickListener(v -> host.backFromVolumePicker());
+    bar.addView(backBtn, host.dp(44), host.dp(44));
+
+    LinearLayout titleCol = host.col();
+    titleCol.setPadding(host.dp(4), 0, host.dp(8), 0);
+    TextView titleView = host.label("받을 권 선택", 18, host.ink, true);
+    host.one(titleView);
+    titleCol.addView(titleView);
+    TextView subSeries = host.label(seriesName, 12, host.muted, false);
+    host.one(subSeries);
+    titleCol.addView(subSeries);
+    host.weight(bar, titleCol);
+
+    TextView countBadge = host.label("", 12, host.accent, true);
+    countBadge.setPadding(host.dp(10), host.dp(5), host.dp(10), host.dp(5));
+    countBadge.setBackground(pillShape(trackBg(), 12));
+    bar.addView(countBadge);
+    root.addView(bar, -1, -2);
+
+    View headerLine = new View(host);
+    headerLine.setBackgroundColor(dividerColor());
+    root.addView(headerLine, new LinearLayout.LayoutParams(-1, host.dp(1)));
+
+    // 본문 스크롤
+    ScrollView scroll = new ScrollView(host);
+    scroll.setTag("settings_scroll");
+    scroll.setClipToPadding(false);
+    LinearLayout content = host.col();
+    content.setTag("settings_content");
+    content.setPadding(hPad, host.dp(12), hPad, host.dp(20));
+
+    // 빠른 선택 칩
+    HorizontalScrollView chipScroll = new HorizontalScrollView(host);
+    chipScroll.setHorizontalScrollBarEnabled(false);
+    LinearLayout chipRow = host.row();
+    chipScroll.addView(chipRow);
+    LinearLayout.LayoutParams chipLp = new LinearLayout.LayoutParams(-1, -2);
+    chipLp.bottomMargin = host.dp(12);
+    content.addView(chipScroll, chipLp);
+
+    LinearLayout listCard = host.col();
+    listCard.setBackground(cardShape());
+    listCard.setClipToOutline(true);
+    content.addView(listCard, -1, -2);
+
+    FrameLayout.LayoutParams contentLp =
+        new FrameLayout.LayoutParams(colWidth, ViewGroup.LayoutParams.WRAP_CONTENT);
+    if (wide) contentLp.gravity = Gravity.CENTER_HORIZONTAL;
+    scroll.addView(content, contentLp);
+    root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+
+    // 하단 고정 실행 바
+    View bottomLine = new View(host);
+    bottomLine.setBackgroundColor(dividerColor());
+    root.addView(bottomLine, new LinearLayout.LayoutParams(-1, host.dp(1)));
+
+    FrameLayout bottomWrap = new FrameLayout(host);
+    bottomWrap.setBackgroundColor(cardBg());
+    LinearLayout bottomInner = host.row();
+    bottomInner.setPadding(hPad, host.dp(12), hPad, host.dp(12));
+    TextView submitBtn = host.label("", 15, activePillText(), true);
+    submitBtn.setGravity(Gravity.CENTER);
+    submitBtn.setPadding(host.dp(16), host.dp(13), host.dp(16), host.dp(13));
+    submitBtn.setMinHeight(host.dp(48));
+    bottomInner.addView(submitBtn, new LinearLayout.LayoutParams(-1, -2));
+    FrameLayout.LayoutParams bLp =
+        new FrameLayout.LayoutParams(colWidth, ViewGroup.LayoutParams.WRAP_CONTENT);
+    if (wide) bLp.gravity = Gravity.CENTER_HORIZONTAL;
+    bottomWrap.addView(bottomInner, bLp);
+    root.addView(bottomWrap, -1, -2);
+
+    final Map<Long, CheckBox> checkMap = new LinkedHashMap<>();
+
+    Runnable updateSubmit =
+        () -> {
+          int n = selectedIds.size();
+          long estBytes = 0;
+          Set<String> seenOuter = new HashSet<>();
+          for (Library.Book item : remoteVolumes) {
+            if (selectedIds.contains(item.id) && seenOuter.add(RemoteBooks.outer(item.url))) {
+              if (item.size > 0) estBytes += item.size;
+            }
+          }
+          countBadge.setText(n + "권 선택");
+          if (n == 0) {
+            submitBtn.setText("받을 권을 선택하세요");
+            submitBtn.setBackground(pillShape(trackBg(), 12));
+            submitBtn.setTextColor(host.muted);
+            submitBtn.setEnabled(false);
+          } else {
+            String sizeSuffix = estBytes > 0 ? "  ·  " + RemoteBooks.formatSize(estBytes) : "";
+            submitBtn.setText("선택한 " + n + "권 미리 받기" + sizeSuffix);
+            submitBtn.setBackground(pillShape(host.accent, 12));
+            submitBtn.setTextColor(activePillText());
+            submitBtn.setEnabled(true);
+          }
+        };
+
+    java.util.function.Function<String, TextView> makeQuickChip =
+        label -> {
+          TextView c = host.label(label, 12, host.ink, true);
+          c.setPadding(host.dp(12), host.dp(8), host.dp(12), host.dp(8));
+          c.setBackground(cardShape());
+          LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+          lp.rightMargin = host.dp(8);
+          c.setLayoutParams(lp);
+          return c;
+        };
+
+    Runnable syncCheckboxes =
+        () -> {
+          for (Map.Entry<Long, CheckBox> e : checkMap.entrySet()) {
+            CheckBox cb = e.getValue();
+            if (cb.isEnabled()) cb.setChecked(selectedIds.contains(e.getKey()));
+          }
+          updateSubmit.run();
+        };
+
+    TextView allChip = makeQuickChip.apply("미보관 전체");
+    allChip.setTextColor(host.accent);
+    allChip.setOnClickListener(
+        v -> {
+          selectedIds.clear();
+          for (Library.Book item : remoteVolumes) {
+            if (!RemoteBooks.has(host, item.url)
+                && !DownloadService.isQueuedOrDownloading(item.url)) {
+              selectedIds.add(item.id);
+            }
+          }
+          syncCheckboxes.run();
+        });
+    chipRow.addView(allChip);
+
+    if (fromDetail && fAnchorIdx >= 0) {
+      TextView fromHereChip = makeQuickChip.apply("이 권부터 끝까지");
+      fromHereChip.setOnClickListener(
+          v -> {
+            selectedIds.clear();
+            for (int i = fAnchorIdx; i < remoteVolumes.size(); i++) {
+              Library.Book item = remoteVolumes.get(i);
+              if (!RemoteBooks.has(host, item.url)
+                  && !DownloadService.isQueuedOrDownloading(item.url)) {
+                selectedIds.add(item.id);
+              }
+            }
+            syncCheckboxes.run();
+          });
+      chipRow.addView(fromHereChip);
+
+      TextView next5Chip = makeQuickChip.apply("이 권부터 5권");
+      next5Chip.setOnClickListener(
+          v -> {
+            selectedIds.clear();
+            int added = 0;
+            for (int i = fAnchorIdx; i < remoteVolumes.size() && added < 5; i++) {
+              Library.Book item = remoteVolumes.get(i);
+              if (!RemoteBooks.has(host, item.url)
+                  && !DownloadService.isQueuedOrDownloading(item.url)) {
+                selectedIds.add(item.id);
+                added++;
+              }
+            }
+            syncCheckboxes.run();
+          });
+      chipRow.addView(next5Chip);
+    }
+
+    TextView clearChip = makeQuickChip.apply("선택 해제");
+    clearChip.setTextColor(host.muted);
+    clearChip.setOnClickListener(
+        v -> {
+          selectedIds.clear();
+          syncCheckboxes.run();
+        });
+    chipRow.addView(clearChip);
+
+    // 권별 행 렌더링
+    for (int i = 0; i < remoteVolumes.size(); i++) {
+      Library.Book item = remoteVolumes.get(i);
+      addDividerIfNeeded(listCard);
+      int pct = RemoteBooks.partialPercent(host, item.url);
+      boolean cached = pct == 100;
+      boolean queued = !cached && DownloadService.isQueuedOrDownloading(item.url);
+      boolean selectable = !cached && !queued;
+
+      LinearLayout row = host.row();
+      row.setPadding(host.dp(12), host.dp(10), host.dp(14), host.dp(10));
+      row.setMinimumHeight(host.dp(52));
+      if (!selectable) row.setAlpha(0.55f);
+
+      CheckBox cb = new CheckBox(host);
+      cb.setEnabled(selectable);
+      cb.setChecked(cached || selectedIds.contains(item.id));
+      cb.setOnCheckedChangeListener(
+          (btn, isChecked) -> {
+            if (!selectable) return;
+            if (isChecked) selectedIds.add(item.id);
+            else selectedIds.remove(item.id);
+            updateSubmit.run();
+          });
+      checkMap.put(item.id, cb);
+      row.addView(cb, new LinearLayout.LayoutParams(-2, -2));
+
+      LinearLayout textCol = host.col();
+      textCol.setPadding(host.dp(6), 0, host.dp(8), 0);
+      String vol = Order.volumeLabel(item.title, item.comicNumber);
+      String rowTitle = !vol.isEmpty() ? vol : host.volumeTitle(item);
+      TextView tvTitle = host.label(rowTitle, 14, host.ink, true);
+      host.one(tvTitle);
+      textCol.addView(tvTitle);
+
+      String sub;
+      if (cached) sub = item.size > 0 ? RemoteBooks.formatSize(item.size) + "  ·  휴대폰에 저장됨" : "휴대폰에 저장됨";
+      else if (queued) sub = "다운로드 중 또는 대기열에 있음";
+      else if (pct >= 0) sub = "미완료 " + pct + "% (이어서 받기)" + (item.size > 0 ? "  ·  " + RemoteBooks.formatSize(item.size) : "");
+      else sub = item.size > 0 ? RemoteBooks.formatSize(item.size) : "미보관";
+      TextView tvSub = host.label(sub, 12, host.muted, false);
+      tvSub.setPadding(0, host.dp(2), 0, 0);
+      host.one(tvSub);
+      textCol.addView(tvSub);
+      host.weight(row, textCol);
+
+      String badgeText = cached ? "보관됨" : (queued ? "대기열" : (pct >= 0 ? pct + "%" : null));
+      if (badgeText != null) {
+        int bColor = cached ? host.remoteCachedColor() : (queued ? host.accent : dangerColor());
+        TextView bdg = host.label(badgeText, 11, bColor, true);
+        bdg.setPadding(host.dp(8), host.dp(3), host.dp(8), host.dp(3));
+        bdg.setBackground(pillShape(trackBg(), 10));
+        row.addView(bdg);
+      }
+
+      if (selectable) row.setOnClickListener(v -> cb.setChecked(!cb.isChecked()));
+      listCard.addView(row, -1, -2);
+    }
+
+    submitBtn.setOnClickListener(
+        v -> {
+          List<Library.Book> chosen = new ArrayList<>();
+          Set<String> seenOuter = new HashSet<>();
+          for (Library.Book item : remoteVolumes) {
+            if (selectedIds.contains(item.id)
+                && !RemoteBooks.has(host, item.url)
+                && seenOuter.add(RemoteBooks.outer(item.url))) {
+              chosen.add(item);
+            }
+          }
+          if (chosen.isEmpty()) return;
+          host.closeSettings();
+          host.prefetchRemoteBooks(chosen);
+        });
+
+    updateSubmit.run();
+    if (scrollY > 0) scroll.post(() -> scroll.scrollTo(0, scrollY));
+
+    applySafeInsets(root, ViewCompat.getRootWindowInsets(host.frame));
+    ViewCompat.setOnApplyWindowInsetsListener(
+        root,
+        (view, windowInsets) -> {
+          applySafeInsets(view, windowInsets);
+          return windowInsets;
+        });
+    root.addOnAttachStateChangeListener(
+        new View.OnAttachStateChangeListener() {
+          public void onViewAttachedToWindow(View v) {
+            applySafeInsets(v, ViewCompat.getRootWindowInsets(v));
+            ViewCompat.requestApplyInsets(v);
+          }
+
+          public void onViewDetachedFromWindow(View v) {}
+        });
+    return root;
   }
 }

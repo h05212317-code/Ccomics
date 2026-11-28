@@ -109,4 +109,54 @@ public class DownloadServiceTest {
       s.shutdown();
     }
   }
+
+  @Test
+  public void enqueueBatchAppendsInsteadOfCancellingActiveDownload() throws Exception {
+    byte[] bytes5 = new byte[2_500_000];
+    byte[] bytes6 = new byte[2_500_000];
+    new Random(51).nextBytes(bytes5);
+    new Random(61).nextBytes(bytes6);
+    MockWebServer s = new MockWebServer();
+    s.setDispatcher(
+        new Dispatcher() {
+          public MockResponse dispatch(RecordedRequest r) {
+            byte[] src = r.getPath().contains("vol5") ? bytes5 : bytes6;
+            return RemoteBooksTest.range(src, r, 128_000);
+          }
+        });
+    s.start();
+    Context ctx = RuntimeEnvironment.getApplication();
+    RemoteBooks.clear(ctx);
+    DownloadService.setListener(null);
+    String u5 = s.url("/pikpak/vol5.zip").toString();
+    String u6 = s.url("/pikpak/vol6.zip").toString();
+    try {
+      DownloadService.EnqueueResult r5 =
+          DownloadService.enqueueBatch(
+              ctx, Collections.singletonList(new DownloadService.Target(5L, u5, "5권", "")));
+      assertEquals(1, r5.addedCount);
+      assertFalse(r5.appended);
+
+      // 5권이 내려받아지는 도중에 6권을 추가하면 5권을 취소하지 않고 대기열에 이어 붙는다.
+      Thread.sleep(100);
+      DownloadService.EnqueueResult r6 =
+          DownloadService.enqueueBatch(
+              ctx, Collections.singletonList(new DownloadService.Target(6L, u6, "6권", "")));
+      assertTrue(r6.appended);
+      assertEquals(1, r6.addedCount);
+      assertEquals(r5.sessionId, r6.sessionId);
+
+      long deadline = System.currentTimeMillis() + 15_000;
+      while (DownloadService.isRunning() && System.currentTimeMillis() < deadline) {
+        Thread.sleep(40);
+      }
+      assertFalse(DownloadService.isRunning());
+      assertTrue("vol5 should complete without being cancelled", RemoteBooks.has(ctx, u5));
+      assertTrue("vol6 should also complete from queue", RemoteBooks.has(ctx, u6));
+    } finally {
+      DownloadService.cancelActive(ctx);
+      RemoteBooks.clear(ctx);
+      s.shutdown();
+    }
+  }
 }

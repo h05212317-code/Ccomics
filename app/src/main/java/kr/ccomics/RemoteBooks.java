@@ -287,6 +287,25 @@ final class RemoteBooks {
         || new File(d, base + ".pieces").isFile();
   }
 
+  /** 완료 저장본이면 100, 받다 만 미완료 파일이면 0~99, 아무것도 없으면 -1을 돌려준다. */
+  static int partialPercent(Context ctx, String url) {
+    File d = dir(ctx);
+    String base = fileName(url);
+    if (new File(d, base).isFile()) return 100;
+    File part = new File(d, base + ".part");
+    File pieces = new File(d, base + ".pieces");
+    if (!part.isFile() && !pieces.isFile()) return -1;
+    long total = part.isFile() ? part.length() : 0;
+    if (total <= 0 || !pieces.isFile()) return 0;
+    PieceInfo info = loadPiecesInfo(pieces, total);
+    if (info.pieceSize <= 0) return 0;
+    int count = (int) ((total + info.pieceSize - 1) / info.pieceSize);
+    long got = 0;
+    for (int i = info.done.nextSetBit(0); i >= 0 && i < count; i = info.done.nextSetBit(i + 1))
+      got += Math.min(total, (long) (i + 1) * info.pieceSize) - (long) i * info.pieceSize;
+    return (int) Math.min(99, got * 100 / total);
+  }
+
   static boolean delete(Context ctx, String fileName) {
     if (fileName == null || fileName.isEmpty()) return false;
     File d = dir(ctx);

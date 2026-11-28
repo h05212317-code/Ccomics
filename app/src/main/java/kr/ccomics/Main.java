@@ -30,7 +30,12 @@ public final class Main extends Activity {
   static final int THUMB_MIN_DP = 76, THUMB_MAX_DP = 220, THUMB_DEFAULT_DP = 133;
   static final int SORT_TITLE = 0, SORT_RECENT = 1, SORT_ADDED = 2, SORT_CUSTOM = 3;
   static final int REMOTE_NONE = 0, REMOTE_CLOUD = 1, REMOTE_CACHED = 2;
-  static final int SETTINGS_NONE = 0, SETTINGS_LIBRARY = 1, SETTINGS_REMOTE = 2, SETTINGS_READER = 3;
+  static final int SETTINGS_NONE = 0,
+      SETTINGS_LIBRARY = 1,
+      SETTINGS_REMOTE = 2,
+      SETTINGS_READER = 3,
+      SETTINGS_BOOK_MANAGE = 4,
+      SETTINGS_VOLUME_PICKER = 5;
   static final String[] SORT_NAMES = {"제목순", "최근 읽은순", "최근 추가순", "사용자 정의"};
   AppUpdates updates;
   Library db;
@@ -70,6 +75,8 @@ public final class Main extends Activity {
   View settingsOverlay;
   int settingsPage = SETTINGS_NONE;
   boolean settingsDirty;
+  Library.Book manageTargetBook;
+  boolean manageInDetail;
   String selected = "", shelf = "", query = "", scanMessage = "";
   int filter, gridIndex, gridOffset, volumeIndex, volumeOffset;
   volatile int requestId;
@@ -1824,7 +1831,10 @@ public final class Main extends Activity {
     floatingResumeVisible = false;
     if (selected.isEmpty()) libraryPane(pane, body);
     else detailPane(pane);
-    if (settingsPage == SETTINGS_LIBRARY || settingsPage == SETTINGS_REMOTE) {
+    if (settingsPage == SETTINGS_LIBRARY
+        || settingsPage == SETTINGS_REMOTE
+        || settingsPage == SETTINGS_BOOK_MANAGE
+        || settingsPage == SETTINGS_VOLUME_PICKER) {
       showSettingsPage(settingsPage, savedSettingsScroll);
     }
   }
@@ -3651,7 +3661,19 @@ public final class Main extends Activity {
     View view;
     if (page == SETTINGS_REMOTE) view = settingsUi().buildRemoteSourcesSettings(scrollY);
     else if (page == SETTINGS_READER) view = settingsUi().buildReaderSettings(scrollY);
-    else view = settingsUi().buildLibrarySettings(scrollY);
+    else if (page == SETTINGS_BOOK_MANAGE) {
+      if (manageTargetBook == null) {
+        settingsPage = SETTINGS_NONE;
+        return;
+      }
+      view = settingsUi().buildBookManageSettings(manageTargetBook, manageInDetail, scrollY);
+    } else if (page == SETTINGS_VOLUME_PICKER) {
+      if (manageTargetBook == null) {
+        settingsPage = SETTINGS_NONE;
+        return;
+      }
+      view = settingsUi().buildVolumePickerSettings(manageTargetBook, manageInDetail, scrollY);
+    } else view = settingsUi().buildLibrarySettings(scrollY);
     settingsOverlay = view;
     frame.addView(view, new FrameLayout.LayoutParams(-1, -1));
     ViewCompat.requestApplyInsets(view);
@@ -3667,6 +3689,16 @@ public final class Main extends Activity {
 
   void backFromRemoteSources() {
     showSettingsPage(SETTINGS_LIBRARY, 0);
+  }
+
+  void openVolumeDownloadPicker(Library.Book b, boolean fromDetail) {
+    manageTargetBook = b;
+    manageInDetail = fromDetail;
+    showSettingsPage(SETTINGS_VOLUME_PICKER, 0);
+  }
+
+  void backFromVolumePicker() {
+    showSettingsPage(SETTINGS_BOOK_MANAGE, 0);
   }
 
   void closeSettings() {
@@ -3929,245 +3961,134 @@ public final class Main extends Activity {
   }
 
   void manage(Library.Book b) {
-    int rating = groupRating(b.grp);
-    boolean inSeriesDetail = !selected.isEmpty();
-    LinkedHashSet<String> cachedFiles = new LinkedHashSet<>();
-    long cachedBytes = 0;
-    int cachedVolumes = 0;
-    List<Library.Book> uncachedTargets = new ArrayList<>();
-    Set<String> seenUncachedOuter = new HashSet<>();
-    if (inSeriesDetail) {
-      if (WebDav.isUrl(b.url)) {
-        if (RemoteBooks.hasAny(this, b.url)) {
-          cachedFiles.add(RemoteBooks.fileName(b.url));
-          cachedBytes = RemoteBooks.itemBytes(this, b.url);
-          cachedVolumes = 1;
-        }
-        if (!RemoteBooks.has(this, b.url)) uncachedTargets.add(b);
-      }
-    } else {
-      List<Library.Book> group = groups.get(b.grp);
-      if (group != null) {
-        for (Library.Book item : group) {
-          if (WebDav.isUrl(item.url)) {
-            if (RemoteBooks.hasAny(this, item.url)) {
-              cachedVolumes++;
-              String fn = RemoteBooks.fileName(item.url);
-              if (cachedFiles.add(fn)) cachedBytes += RemoteBooks.itemBytes(this, item.url);
-            }
-            if (!RemoteBooks.has(this, item.url)
-                && seenUncachedOuter.add(RemoteBooks.outer(item.url))) {
-              uncachedTargets.add(item);
-            }
-          }
-        }
-      }
-    }
-    List<String> menuItems =
-        new ArrayList<>(
-            Arrays.asList(
-                "별점 설정  ·  " + stars(rating),
-                "표지 변경",
-                "시리즈 대표 표지로 지정",
-                b.fav ? "즐겨찾기 해제" : "즐겨찾기",
-                b.done ? "읽지 않음으로 표시" : "완독으로 표시",
-                "책장에 배치",
-                "시리즈명 변경",
-                "다른 시리즈에 합치기",
-                "이 권을 별도 시리즈로 분리"));
-    int prefetchIndex = -1;
-    if (!uncachedTargets.isEmpty()) {
-      prefetchIndex = menuItems.size();
-      menuItems.add(
-          inSeriesDetail || uncachedTargets.size() == 1
-              ? "휴대폰에 미리 받기"
-              : "휴대폰에 미리 받기  ·  " + uncachedTargets.size() + "개 파일");
-    }
-    int deleteCacheIndex = -1;
-    if (!cachedFiles.isEmpty()) {
-      deleteCacheIndex = menuItems.size();
-      menuItems.add(
-          inSeriesDetail
-              ? "원격 보관함에서 삭제  ·  " + RemoteBooks.formatSize(cachedBytes)
-              : "원격 보관함에서 비우기  ·  "
-                  + cachedVolumes
-                  + "권 · "
-                  + RemoteBooks.formatSize(cachedBytes));
-    }
-    long fCachedBytes = cachedBytes;
-    int fPrefetchIndex = prefetchIndex;
-    int fDeleteCacheIndex = deleteCacheIndex;
+    manageTargetBook = b;
+    manageInDetail = !selected.isEmpty();
+    showSettingsPage(SETTINGS_BOOK_MANAGE, 0);
+  }
+
+  void confirmDeleteBookCache(
+      String targetName, Collection<String> files, long bytes, boolean partialOnly) {
+    String title = partialOnly ? "미완료 캐시 지우기" : "원격 보관함에서 삭제";
+    String msg =
+        targetName
+            + " ("
+            + RemoteBooks.formatSize(bytes)
+            + ")의 "
+            + (partialOnly ? "미완료 임시 파일을 지웁니다." : "휴대폰 저장본을 지웁니다. 원본 파일은 유지됩니다.");
+    dialog()
+        .setTitle(title)
+        .setMessage(msg)
+        .setPositiveButton(
+            "삭제",
+            (d, w) -> {
+              deleteRemoteCacheFiles(files);
+              toast(partialOnly ? "미완료 캐시를 정리했습니다." : "원격 보관함에서 삭제했습니다.");
+              refreshSettingsView();
+            })
+        .setNegativeButton("취소", null)
+        .show();
+  }
+
+  void assignBookShelf(Library.Book b) {
+    List<String> list = db.strings("SELECT name FROM shelves ORDER BY name");
+    list.add(0, "책장 지정 해제");
+    list.add("새 책장…");
     choices(
-        volumeTitle(b),
-        menuItems.toArray(new String[0]),
-        i -> {
-          if (i == fPrefetchIndex && !uncachedTargets.isEmpty()) {
-            prefetchRemoteBooks(uncachedTargets);
-            return;
-          }
-          if (i == fDeleteCacheIndex && !cachedFiles.isEmpty()) {
-            String targetName =
-                inSeriesDetail
-                    ? volumeTitle(b)
-                    : seriesDisplayName(b.grp, groups.getOrDefault(b.grp, Collections.singletonList(b)));
-            dialog()
-                .setTitle("원격 보관함에서 삭제")
-                .setMessage(
-                    targetName
-                        + " ("
-                        + RemoteBooks.formatSize(fCachedBytes)
-                        + ")을 휴대폰 보관함에서 지웁니다. 원본 파일은 유지됩니다.")
-                .setPositiveButton(
-                    "삭제",
-                    (d, w) -> {
-                      deleteRemoteCacheFiles(cachedFiles);
-                      toast("원격 보관함에서 삭제했습니다.");
-                    })
-                .setNegativeButton("취소", null)
-                .show();
-            return;
-          }
-          if (i == 0) {
-            pickRating(b);
-            return;
-          }
-          if (i == 1) {
-            chooseCover(b);
-            return;
-          }
-          if (i == 2) {
-            db.exec("UPDATE books SET rep=(id=?) WHERE grp=?", b.id, b.grp);
-            List<Library.Book> group = groups.get(b.grp);
-            if (group != null) {
-              for (Library.Book item : group) item.rep = (item.id == b.id);
-              rebuildEntry(b.grp);
-            }
-            renderNow(true);
-            return;
-          }
-          if (i == 3) {
-            b.fav = !b.fav;
-            db.exec("UPDATE books SET fav=? WHERE id=?", b.fav ? 1 : 0, b.id);
-            rebuildEntry(b.grp);
-            renderNow(true);
-            return;
-          }
-          if (i == 4) {
-            boolean wasDone = b.done;
-            b.done = !wasDone;
-            if (wasDone) {
-              b.opened = 0;
-              b.page = 0;
-            }
-            db.exec(
-                "UPDATE books SET done=?,opened=CASE WHEN ? THEN 0 ELSE opened END,page=CASE WHEN ?"
-                    + " THEN 0 ELSE page END WHERE id=?",
-                b.done ? 1 : 0,
-                wasDone ? 1 : 0,
-                wasDone ? 1 : 0,
-                b.id);
-            rebuildEntry(b.grp);
-            renderNow(true);
-            return;
-          }
-          if (i == 5) {
-            List<String> list = db.strings("SELECT name FROM shelves ORDER BY name");
-            list.add(0, "책장 지정 해제");
-            list.add("새 책장…");
-            choices(
-                "작품을 배치할 책장",
-                list.toArray(new String[0]),
-                p -> {
-                  if (p == list.size() - 1) {
-                    input(
-                        "새 책장",
-                        "",
-                        s -> {
-                          if (!s.isEmpty()) {
-                            db.exec("INSERT OR IGNORE INTO shelves VALUES(?)", s);
-                            db.exec("UPDATE books SET shelf=? WHERE grp=?", s, b.grp);
-                            List<Library.Book> group = groups.get(b.grp);
-                            if (group != null) {
-                              for (Library.Book item : group) item.shelf = s;
-                              rebuildEntry(b.grp);
-                            }
-                            renderNow(true);
-                          }
-                        });
-                  } else {
-                    String nextShelf = p == 0 ? "" : list.get(p);
-                    db.exec("UPDATE books SET shelf=? WHERE grp=?", nextShelf, b.grp);
-                    List<Library.Book> group = groups.get(b.grp);
-                    if (group != null) {
-                      for (Library.Book item : group) item.shelf = nextShelf;
-                      rebuildEntry(b.grp);
-                    }
-                    renderNow(true);
-                  }
-                });
-            return;
-          }
-          if (i == 6) {
+        "작품을 배치할 책장",
+        list.toArray(new String[0]),
+        p -> {
+          if (p == list.size() - 1) {
             input(
-                "시리즈명 변경",
-                b.series,
+                "새 책장",
+                "",
                 s -> {
                   if (!s.isEmpty()) {
-                    db.exec("UPDATE books SET manualGroup=1,series=? WHERE grp=?", s, b.grp);
+                    db.exec("INSERT OR IGNORE INTO shelves VALUES(?)", s);
+                    db.exec("UPDATE books SET shelf=? WHERE grp=?", s, b.grp);
                     List<Library.Book> group = groups.get(b.grp);
                     if (group != null) {
-                      for (Library.Book item : group) {
-                        item.manualGroup = true;
-                        item.series = s;
-                      }
+                      for (Library.Book item : group) item.shelf = s;
                       rebuildEntry(b.grp);
                     }
-                    renderNow(true);
+                    settingsDirty = true;
+                    refreshSettingsView();
                   }
                 });
-            return;
-          }
-          if (i == 7) {
-            List<String> keys = new ArrayList<>(groups.keySet());
-            keys.remove(b.grp);
-            if (keys.isEmpty()) {
-              toast("합칠 다른 작품이 없습니다.");
-              return;
+          } else {
+            String nextShelf = p == 0 ? "" : list.get(p);
+            db.exec("UPDATE books SET shelf=? WHERE grp=?", nextShelf, b.grp);
+            List<Library.Book> group = groups.get(b.grp);
+            if (group != null) {
+              for (Library.Book item : group) item.shelf = nextShelf;
+              rebuildEntry(b.grp);
             }
-            String[] names = new String[keys.size()];
-            for (int k = 0; k < names.length; k++) {
-              String key = keys.get(k);
-              names[k] = seriesDisplayName(key, groups.get(key));
+            settingsDirty = true;
+            refreshSettingsView();
+          }
+        });
+  }
+
+  void renameSeriesDialog(Library.Book b) {
+    input(
+        "시리즈명 변경",
+        b.series,
+        s -> {
+          if (!s.isEmpty()) {
+            db.exec("UPDATE books SET manualGroup=1,series=? WHERE grp=?", s, b.grp);
+            List<Library.Book> group = groups.get(b.grp);
+            if (group != null) {
+              for (Library.Book item : group) {
+                item.manualGroup = true;
+                item.series = s;
+              }
+              rebuildEntry(b.grp);
             }
-            choices(
-                "합칠 시리즈",
-                names,
-                k -> {
-                  Library.Book dest = groups.get(keys.get(k)).get(0);
-                  int mergedRating = Math.max(groupRating(dest.grp), groupRating(b.grp));
-                  db.exec("UPDATE books SET manualGroup=1,rating=? WHERE grp=?", mergedRating, dest.grp);
-                  db.exec(
-                      "UPDATE books SET manualGroup=1,grp=?,series=?,shelf=?,rating=?,rep=0 WHERE"
-                          + " grp=?",
-                      dest.grp,
-                      dest.series,
-                      dest.shelf,
-                      mergedRating,
-                      b.grp);
-                  selected = dest.grp;
-                  library(true);
-                });
-            return;
+            settingsDirty = true;
+            refreshSettingsView();
           }
-          if (i == 8) {
-            db.exec(
-                "UPDATE books SET manualGroup=1,grp=?,series=title,rep=0 WHERE id=?",
-                "manual:" + b.id,
-                b.id);
-            selected = "manual:" + b.id;
-          }
+        });
+  }
+
+  void mergeSeriesDialog(Library.Book b) {
+    List<String> keys = new ArrayList<>(groups.keySet());
+    keys.remove(b.grp);
+    if (keys.isEmpty()) {
+      toast("합칠 다른 작품이 없습니다.");
+      return;
+    }
+    String[] names = new String[keys.size()];
+    for (int k = 0; k < names.length; k++) {
+      String key = keys.get(k);
+      names[k] = seriesDisplayName(key, groups.get(key));
+    }
+    choices(
+        "합칠 시리즈",
+        names,
+        k -> {
+          Library.Book dest = groups.get(keys.get(k)).get(0);
+          int mergedRating = Math.max(groupRating(dest.grp), groupRating(b.grp));
+          db.exec("UPDATE books SET manualGroup=1,rating=? WHERE grp=?", mergedRating, dest.grp);
+          db.exec(
+              "UPDATE books SET manualGroup=1,grp=?,series=?,shelf=?,rating=?,rep=0 WHERE grp=?",
+              dest.grp,
+              dest.series,
+              dest.shelf,
+              mergedRating,
+              b.grp);
+          selected = dest.grp;
+          closeSettings();
           library(true);
         });
+  }
+
+  void splitVolumeFromSeries(Library.Book b) {
+    db.exec(
+        "UPDATE books SET manualGroup=1,grp=?,series=title,rep=0 WHERE id=?",
+        "manual:" + b.id,
+        b.id);
+    selected = "manual:" + b.id;
+    closeSettings();
+    library(true);
   }
 
   void chooseCover(Library.Book b) {
@@ -4287,11 +4208,15 @@ public final class Main extends Activity {
               });
         }
 
-        public void onDownloadBookSaved(int sessionId, long bookId) {
+        public void onDownloadBookSaved(int sessionId, long bookId, boolean openNow) {
           runOnUiThread(
               () -> {
                 if (isDestroyed() || sessionId != activeDownloadSession) return;
                 if (reader == null) refreshRemoteEntries();
+                if (openNow && bookId > 0 && db != null) {
+                  Library.Book target = db.get(bookId);
+                  if (target != null) openArchiveReady(target, requestId);
+                }
               });
         }
 
@@ -4374,48 +4299,83 @@ public final class Main extends Activity {
     updateScanBanner();
   }
 
-  /** 원격 책 여러 권을 열지 않고 백그라운드 포그라운드 서비스로 미리 휴대폰 보관함에 받아 둔다. */
+  /** 원격 책 여러 권을 열지 않고 백그라운드 포그라운드 서비스 대기열에 추가해 받아 둔다(기존 받기 취소 없음). */
   void prefetchRemoteBooks(List<Library.Book> targets) {
     if (targets == null || targets.isEmpty()) return;
     maybeRequestNotificationPermission();
-    abortActiveDownload();
-    int token = ++requestId;
-    loadingBook = true;
-    getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-    scanMessage = "미리 받기를 시작합니다…";
-    if (reader == null) updateScanBanner();
+    boolean alreadyRunning = DownloadService.isRunning();
+    if (!alreadyRunning) {
+      loadingBook = true;
+      getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+      scanMessage = "미리 받기를 시작합니다…";
+      if (reader == null) updateScanBanner();
+    }
     readerIO.execute(
         () -> {
           try {
             List<DownloadService.Target> jobTargets = new ArrayList<>(targets.size());
+            Set<String> seenOuter = new HashSet<>();
             for (Library.Book b : targets) {
-              if (token != requestId || isDestroyed()) return;
+              if (isDestroyed()) return;
               if (RemoteBooks.has(this, b.url)) continue;
+              if (!seenOuter.add(RemoteBooks.outer(b.url))) continue;
               jobTargets.add(
                   new DownloadService.Target(b.id, b.url, volumeTitle(b), db.httpAuth(b.source)));
             }
-            if (token != requestId || isDestroyed()) return;
+            if (isDestroyed()) return;
             if (jobTargets.isEmpty()) {
               runOnUiThread(
                   () -> {
-                    if (isDestroyed() || token != requestId) return;
-                    loadingBook = false;
-                    scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
-                    updateScanBanner();
+                    if (isDestroyed()) return;
+                    if (!DownloadService.isRunning()) {
+                      loadingBook = false;
+                      scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+                      updateScanBanner();
+                    }
                     toast("이미 모두 휴대폰 보관함에 있습니다.");
                   });
               return;
             }
             DownloadService.setListener(downloadListener);
-            activeDownloadSession = DownloadService.startBatch(this, jobTargets);
+            DownloadService.EnqueueResult res = DownloadService.enqueueBatch(this, jobTargets);
+            activeDownloadSession = res.sessionId;
+            runOnUiThread(
+                () -> {
+                  if (isDestroyed()) return;
+                  if (res.sessionId > 0) {
+                    loadingBook = true;
+                    getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    if (res.appended) {
+                      if (res.addedCount > 0) {
+                        toast(
+                            "대기열에 "
+                                + res.addedCount
+                                + "권 추가했습니다 (남은 "
+                                + DownloadService.queuedCount()
+                                + "권)");
+                      } else {
+                        toast("이미 다운로드 중이거나 대기열에 있습니다.");
+                      }
+                    } else if (res.addedCount > 1) {
+                      toast(res.addedCount + "권 미리 받기를 시작합니다.");
+                    }
+                  } else {
+                    loadingBook = false;
+                    scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+                    updateScanBanner();
+                    toast("이미 모두 휴대폰 보관함에 있습니다.");
+                  }
+                });
           } catch (Exception e) {
             runOnUiThread(
                 () -> {
-                  if (isDestroyed() || token != requestId) return;
-                  loadingBook = false;
-                  getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                  scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
-                  updateScanBanner();
+                  if (isDestroyed()) return;
+                  if (!DownloadService.isRunning()) {
+                    loadingBook = false;
+                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+                    updateScanBanner();
+                  }
                   alert("미리 받기 실패", Library.reason(e));
                 });
           }
@@ -4432,13 +4392,13 @@ public final class Main extends Activity {
   void open(Library.Book b) {
     remember();
     resumeDismissed = false;
-    abortActiveDownload();
     int token = ++requestId;
-    loadingBook = true;
-    scanMessage = "책을 여는 중…";
-    if (reader == null) updateScanBanner();
-    if (WebDav.isUrl(b.url) && !RemoteBooks.has(this, b.url)) {
+    boolean needDownload = WebDav.isUrl(b.url) && !RemoteBooks.has(this, b.url);
+    if (needDownload) {
       maybeRequestNotificationPermission();
+      loadingBook = true;
+      scanMessage = "책을 여는 중…";
+      if (reader == null) updateScanBanner();
       getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
       readerIO.execute(
           () -> {
@@ -4453,16 +4413,26 @@ public final class Main extends Activity {
               runOnUiThread(
                   () -> {
                     if (isDestroyed() || token != requestId) return;
-                    loadingBook = false;
-                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-                    scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
-                    updateScanBanner();
+                    if (!DownloadService.isRunning()) {
+                      loadingBook = false;
+                      getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                      scanMessage = scanning.isEmpty() ? "" : "책과 표지를 확인하고 있습니다…";
+                      updateScanBanner();
+                    }
                     alert("책을 열 수 없습니다", Library.reason(e));
                   });
             }
           });
       return;
     }
+    // 이미 휴대폰에 있는 책(로컬/보관함)을 열 때는 백그라운드 미리 받기 대기열을 끊지 않는다.
+    if (DownloadService.isWaitingToOpen()) {
+      DownloadService.cancelOpenWaitOnly();
+      if (DownloadService.isWaitingToOpen()) abortActiveDownload();
+    }
+    loadingBook = true;
+    scanMessage = "책을 여는 중…";
+    if (reader == null) updateScanBanner();
     openArchiveReady(b, token);
   }
 
@@ -4925,6 +4895,10 @@ public final class Main extends Activity {
   public void onBackPressed() {
     if (touchZoneOverlay != null) {
       closeTouchZoneEditor();
+      return;
+    }
+    if (settingsPage == SETTINGS_VOLUME_PICKER) {
+      backFromVolumePicker();
       return;
     }
     if (settingsPage == SETTINGS_REMOTE) {

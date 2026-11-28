@@ -12,7 +12,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 원격 책(PC·PikPak)을 백그라운드에서도 끊기지 않고 끝까지 받기 위한 Foreground Service(dataSync).
- * 화면을 벗어나 다른 앱을 쓰거나 화면이 꺼져도 OS 동결을 막고, 상태바 진행 알림과 취소 버튼을 제공한다.
+ *
+ * <p>진행 중인 다운로드가 있을 때 다른 권을 '미리 받기'하면 기존 받기를 취소하지 않고 FIFO 대기열에 이어서 추가한다.
+ * 사용자가 미보관 책을 직접 눌러 열면 해당 책을 대기열 맨 앞으로 우선 배치하고 기존 책은 조각을 유지한 채 뒤로 이어 받는다.
  */
 public final class DownloadService extends Service {
   static final String CHANNEL_ID = "ccomics_download";
@@ -23,6 +25,7 @@ public final class DownloadService extends Service {
 
   private static final ExecutorService EXECUTOR = Executors.newCachedThreadPool();
   private static final AtomicInteger NEXT_ID = new AtomicInteger(1);
+  private static final Object LOCK = new Object();
 
   static final class Target {
     final long bookId;
@@ -34,12 +37,28 @@ public final class DownloadService extends Service {
       this.title = title == null ? "" : title;
       this.auth = auth == null ? "" : auth;
     }
+
+    String outerUrl() {
+      return RemoteBooks.outer(url);
+    }
+  }
+
+  static final class EnqueueResult {
+    final int sessionId;
+    final int addedCount;
+    final boolean appended;
+
+    EnqueueResult(int sessionId, int addedCount, boolean appended) {
+      this.sessionId = sessionId;
+      this.addedCount = addedCount;
+      this.appended = appended;
+    }
   }
 
   interface Listener {
     void onDownloadProgress(int sessionId, String bannerText);
 
-    void onDownloadBookSaved(int sessionId, long bookId);
+    void onDownloadBookSaved(int sessionId, long bookId, boolean openNow);
 
     void onDownloadFinished(int sessionId, long openBookId, int completedCount, boolean batch);
 
@@ -50,12 +69,15 @@ public final class DownloadService extends Service {
 
   static final class Session {
     final int id;
-    final List<Target> targets;
-    final boolean batch;
-    final long openBookId;
-    final RemoteBooks.Cancel cancel = new RemoteBooks.Cancel();
+    final ArrayDeque<Target> queue = new ArrayDeque<>();
+    Target current;
+    RemoteBooks.Cancel itemCancel;
     volatile boolean running = true;
-    volatile boolean completedInBackground;
+    volatile boolean stopAll;
+    volatile boolean preempted;
+    volatile boolean batchMode;
+    volatile long openBookId;
+    volatile int totalPlanned;
     volatile int completedCount;
     volatile String notifTitle = "원격 책 받는 중";
     volatile String notifText = "준비 중…";
@@ -63,11 +85,20 @@ public final class DownloadService extends Service {
     volatile int percent;
     volatile long lastNotifAt;
 
-    Session(int id, List<Target> targets, boolean batch, long openBookId) {
+    Session(int id, boolean batchMode, long openBookId) {
       this.id = id;
-      this.targets = targets;
-      this.batch = batch;
+      this.batchMode = batchMode;
       this.openBookId = openBookId;
+    }
+
+    boolean containsOuterLocked(String outer) {
+      if (current != null && outer.equals(current.outerUrl())) return true;
+      for (Target t : queue) if (outer.equals(t.outerUrl())) return true;
+      return false;
+    }
+
+    int remainingLocked() {
+      return (current != null ? 1 : 0) + queue.size();
     }
   }
 
@@ -84,13 +115,35 @@ public final class DownloadService extends Service {
   }
 
   static boolean isRunning() {
-    Session s = active;
-    return s != null && s.running;
+    synchronized (LOCK) {
+      return active != null && active.running;
+    }
+  }
+
+  static boolean isWaitingToOpen() {
+    synchronized (LOCK) {
+      return active != null && active.running && active.openBookId > 0;
+    }
   }
 
   static int activeSessionId() {
-    Session s = active;
-    return s != null && s.running ? s.id : 0;
+    synchronized (LOCK) {
+      return active != null && active.running ? active.id : 0;
+    }
+  }
+
+  static int queuedCount() {
+    synchronized (LOCK) {
+      return active != null && active.running ? active.remainingLocked() : 0;
+    }
+  }
+
+  static boolean isQueuedOrDownloading(String url) {
+    if (url == null || url.isEmpty()) return false;
+    String outer = RemoteBooks.outer(url);
+    synchronized (LOCK) {
+      return active != null && active.running && active.containsOuterLocked(outer);
+    }
   }
 
   static String currentBanner() {
@@ -110,40 +163,117 @@ public final class DownloadService extends Service {
     return v;
   }
 
+  /** 사용자가 직접 누른 책 1권을 최우선으로 받는다. 기존 미리 받기 대기열이 있으면 버리지 않고 이어서 받는다. */
   static int startSingle(Context ctx, Target target) {
-    return enqueue(ctx.getApplicationContext(), Collections.singletonList(target), false, target.bookId);
+    Context appCtx = ctx.getApplicationContext();
+    RemoteBooks.Cancel cancelToPreempt = null;
+    Session toStart = null;
+    int sid;
+    synchronized (LOCK) {
+      pendingOpenBookId = 0L;
+      Session cur = active;
+      if (cur != null && cur.running && !cur.stopAll) {
+        String outer = target.outerUrl();
+        cur.openBookId = target.bookId;
+        if (cur.current != null && outer.equals(cur.current.outerUrl())) {
+          // 이미 지금 받고 있는 책이면 그대로 끝까지 받고 열기만 연결한다.
+          return cur.id;
+        }
+        // 대기열 안에 이미 있으면 맨 앞으로 옮기고, 없으면 맨 앞에 끼워 넣는다.
+        boolean existed = false;
+        Iterator<Target> it = cur.queue.iterator();
+        while (it.hasNext()) {
+          if (outer.equals(it.next().outerUrl())) {
+            it.remove();
+            existed = true;
+            break;
+          }
+        }
+        if (cur.batchMode && cur.current != null) {
+          // 기존 미리 받기 책은 조각이 남아 있으므로 뒤로 미루고, 열려는 책을 먼저 받는다.
+          cur.queue.addFirst(cur.current);
+          cur.queue.addFirst(target);
+          if (!existed) cur.totalPlanned++;
+          cur.preempted = true;
+          cancelToPreempt = cur.itemCancel;
+          sid = cur.id;
+        } else {
+          // 이전 단일 열기 대기였으면 이전 세션을 교체한다.
+          cur.stopAll = true;
+          cur.running = false;
+          cancelToPreempt = cur.itemCancel;
+          Session fresh = createSessionLocked(Collections.singletonList(target), false, target.bookId);
+          toStart = fresh;
+          sid = fresh.id;
+        }
+      } else {
+        Session fresh = createSessionLocked(Collections.singletonList(target), false, target.bookId);
+        toStart = fresh;
+        sid = fresh.id;
+      }
+    }
+    if (cancelToPreempt != null) {
+      RemoteBooks.Cancel c = cancelToPreempt;
+      c.markCancelled();
+      EXECUTOR.execute(c::cancel);
+    }
+    if (toStart != null) launchSession(appCtx, toStart);
+    return sid;
+  }
+
+  /** 미리 받기: 이미 받기가 진행 중이면 취소하지 않고 대기열(FIFO)에 추가한다. */
+  static EnqueueResult enqueueBatch(Context ctx, List<Target> targets) {
+    if (targets == null || targets.isEmpty()) return new EnqueueResult(0, 0, false);
+    Context appCtx = ctx.getApplicationContext();
+    Session toStart = null;
+    int sid = 0;
+    int added = 0;
+    boolean appended = false;
+    synchronized (LOCK) {
+      Session cur = active;
+      if (cur != null && cur.running && !cur.stopAll) {
+        cur.batchMode = true;
+        for (Target t : targets) {
+          if (RemoteBooks.has(appCtx, t.url)) continue;
+          if (!cur.containsOuterLocked(t.outerUrl())) {
+            cur.queue.addLast(t);
+            cur.totalPlanned++;
+            added++;
+          }
+        }
+        sid = cur.id;
+        appended = true;
+        if (added > 0) {
+          DownloadService svc = instance;
+          if (svc != null) svc.updateNotification(cur);
+        }
+      } else {
+        List<Target> deduped = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (Target t : targets) {
+          if (RemoteBooks.has(appCtx, t.url)) continue;
+          if (seen.add(t.outerUrl())) deduped.add(t);
+        }
+        if (!deduped.isEmpty()) {
+          toStart = createSessionLocked(deduped, true, 0L);
+          sid = toStart.id;
+          added = deduped.size();
+        }
+      }
+    }
+    if (toStart != null) launchSession(appCtx, toStart);
+    return new EnqueueResult(sid, added, appended);
   }
 
   static int startBatch(Context ctx, List<Target> targets) {
-    if (targets == null || targets.isEmpty()) return 0;
-    return enqueue(ctx.getApplicationContext(), new ArrayList<>(targets), true, 0L);
+    return enqueueBatch(ctx, targets).sessionId;
   }
 
-  static void cancelActive(Context ctx) {
-    Session prev = active;
-    pendingOpenBookId = 0L;
-    if (prev != null) {
-      prev.running = false;
-      prev.cancel.markCancelled();
-      EXECUTOR.execute(prev.cancel::cancel);
-      if (active == prev) active = null;
-    }
-    DownloadService svc = instance;
-    if (svc != null) svc.stopForegroundClean();
-    Listener l = listener;
-    if (l != null && prev != null) l.onDownloadCancelled(prev.id);
-  }
-
-  private static int enqueue(Context appCtx, List<Target> targets, boolean batch, long openBookId) {
-    Session prev = active;
-    if (prev != null) {
-      prev.running = false;
-      prev.cancel.markCancelled();
-      EXECUTOR.execute(prev.cancel::cancel);
-    }
-    pendingOpenBookId = 0L;
+  private static Session createSessionLocked(List<Target> targets, boolean batch, long openBookId) {
     int sid = NEXT_ID.getAndIncrement();
-    Session session = new Session(sid, targets, batch, openBookId);
+    Session session = new Session(sid, batch, openBookId);
+    session.queue.addAll(targets);
+    session.totalPlanned = targets.size();
     Target first = targets.get(0);
     String origin = WebDav.isPikPak(first.url) ? "PikPak" : "PC";
     session.notifTitle =
@@ -153,124 +283,233 @@ public final class DownloadService extends Service {
     session.notifText = first.title.isEmpty() ? "다운로드 준비 중…" : first.title;
     session.bannerText = batch ? "미리 받기를 시작합니다…" : "책을 여는 중…";
     active = session;
+    return session;
+  }
 
+  private static void launchSession(Context appCtx, Session session) {
     try {
       Intent in = new Intent(appCtx, DownloadService.class).setAction(ACTION_START);
       ContextCompat.startForegroundService(appCtx, in);
     } catch (Exception ignored) {
       // 테스트 환경이나 OS 제약 시에도 앱 내부 백그라운드 스레드로 계속 실행한다.
     }
-
     EXECUTOR.execute(() -> runSession(appCtx, session));
-    return sid;
+  }
+
+  /** 단일 열기 대기만 취소(백그라운드 미리 받기가 돌고 있으면 열기 예약만 해제). */
+  static void cancelOpenWaitOnly() {
+    synchronized (LOCK) {
+      if (active != null && active.running && active.batchMode) {
+        active.openBookId = 0L;
+        pendingOpenBookId = 0L;
+      }
+    }
+  }
+
+  static void cancelActive(Context ctx) {
+    Session prev;
+    RemoteBooks.Cancel itemCancel = null;
+    synchronized (LOCK) {
+      prev = active;
+      pendingOpenBookId = 0L;
+      if (prev != null) {
+        prev.stopAll = true;
+        prev.running = false;
+        prev.queue.clear();
+        itemCancel = prev.itemCancel;
+        active = null;
+      }
+    }
+    if (itemCancel != null) {
+      RemoteBooks.Cancel c = itemCancel;
+      c.markCancelled();
+      EXECUTOR.execute(c::cancel);
+    }
+    DownloadService svc = instance;
+    if (svc != null) svc.stopForegroundClean();
+    Listener l = listener;
+    if (l != null && prev != null) l.onDownloadCancelled(prev.id);
   }
 
   private static void runSession(Context appCtx, Session session) {
-    int completed = 0;
     try {
-      for (int idx = 0; idx < session.targets.size(); idx++) {
-        if (!session.running || session.cancel.isCancelled() || active != session) {
-          throw new InterruptedIOException("취소");
+      while (true) {
+        Target t;
+        RemoteBooks.Cancel cancel;
+        int pos, count;
+        boolean isOpeningTarget;
+        synchronized (LOCK) {
+          if (session.stopAll || !session.running || active != session) {
+            throw new InterruptedIOException("취소");
+          }
+          t = session.queue.pollFirst();
+          if (t == null) {
+            session.current = null;
+            session.itemCancel = null;
+            break;
+          }
+          session.current = t;
+          session.preempted = false;
+          cancel = new RemoteBooks.Cancel();
+          session.itemCancel = cancel;
+          pos = session.completedCount + 1;
+          count = Math.max(pos, session.totalPlanned);
+          isOpeningTarget = (session.openBookId > 0 && t.bookId == session.openBookId);
         }
-        Target t = session.targets.get(idx);
+
         if (RemoteBooks.has(appCtx, t.url)) {
-          completed++;
-          session.completedCount = completed;
+          synchronized (LOCK) {
+            session.completedCount++;
+            session.current = null;
+            session.itemCancel = null;
+          }
+          notifyBookSaved(session, t, isOpeningTarget);
           continue;
         }
-        int pos = idx + 1, count = session.targets.size();
+
         String origin = WebDav.isPikPak(t.url) ? "PikPak" : "PC";
-        String prefix = session.batch && count > 1 ? "[" + pos + "/" + count + "] " : "";
-        String actionLabel = session.batch ? "미리 받는 중" : "받는 중";
-        session.notifTitle = prefix + origin + "에서 " + actionLabel;
+        String actionLabel = isOpeningTarget ? "받는 중" : (session.batchMode ? "미리 받는 중" : "받는 중");
         final long[] speedState = {0L, 0L};
 
-        RemoteBooks.download(
-            appCtx,
-            t.url,
-            t.auth,
-            new RemoteBooks.Progress() {
-              public void update(long done, long total) {
-                long now = System.currentTimeMillis();
-                if (speedState[0] == 0L) {
-                  speedState[0] = now;
-                  speedState[1] = done;
+        try {
+          RemoteBooks.download(
+              appCtx,
+              t.url,
+              t.auth,
+              new RemoteBooks.Progress() {
+                public void update(long done, long total) {
+                  long now = System.currentTimeMillis();
+                  if (speedState[0] == 0L) {
+                    speedState[0] = now;
+                    speedState[1] = done;
+                  }
+                  int pct = total > 0 ? (int) Math.min(100, done * 100 / total) : 0;
+                  String rate = Main.formatSpeed(done - speedState[1], now - speedState[0]);
+                  int curPos, curCount;
+                  synchronized (LOCK) {
+                    curPos = session.completedCount + 1;
+                    curCount = Math.max(curPos, session.totalPlanned);
+                  }
+                  String dynPrefix = curCount > 1 ? "[" + curPos + "/" + curCount + "] " : "";
+                  String titlePrefix = curCount > 1 ? "[" + curPos + "/" + curCount + "] " : "";
+                  session.notifTitle = titlePrefix + origin + "에서 " + actionLabel;
+                  String banner =
+                      String.format(
+                          Locale.KOREA,
+                          "%s%s에서 %s %d%%  ·  %d / %dMB%s",
+                          dynPrefix,
+                          origin,
+                          actionLabel,
+                          pct,
+                          done >> 20,
+                          total >> 20,
+                          rate);
+                  String nText =
+                      (t.title.isEmpty() ? "" : t.title + " · ")
+                          + pct
+                          + "% ("
+                          + (done >> 20)
+                          + "/"
+                          + (total >> 20)
+                          + "MB)"
+                          + (rate.isEmpty() ? "" : rate.replace("  ·  ", " · "));
+                  session.percent = pct;
+                  session.bannerText = banner;
+                  session.notifText = nText;
+                  Listener l = listener;
+                  if (l != null && active == session) l.onDownloadProgress(session.id, banner);
+                  if (now - session.lastNotifAt >= 350) {
+                    session.lastNotifAt = now;
+                    DownloadService svc = instance;
+                    if (svc != null && active == session) svc.updateNotification(session);
+                  }
                 }
-                int pct = total > 0 ? (int) Math.min(100, done * 100 / total) : 0;
-                String rate = Main.formatSpeed(done - speedState[1], now - speedState[0]);
-                String banner =
-                    String.format(
-                        Locale.KOREA,
-                        "%s%s에서 %s %d%%  ·  %d / %dMB%s",
-                        prefix,
-                        origin,
-                        actionLabel,
-                        pct,
-                        done >> 20,
-                        total >> 20,
-                        rate);
-                String nText =
-                    (t.title.isEmpty() ? "" : t.title + " · ")
-                        + pct
-                        + "% ("
-                        + (done >> 20)
-                        + "/"
-                        + (total >> 20)
-                        + "MB)"
-                        + (rate.isEmpty() ? "" : rate.replace("  ·  ", " · "));
-                session.percent = pct;
-                session.bannerText = banner;
-                session.notifText = nText;
-                Listener l = listener;
-                if (l != null && active == session) l.onDownloadProgress(session.id, banner);
-                if (now - session.lastNotifAt >= 350) {
-                  session.lastNotifAt = now;
-                  DownloadService svc = instance;
-                  if (svc != null && active == session) svc.updateNotification(session);
+
+                public boolean cancelled() {
+                  return session.stopAll
+                      || !session.running
+                      || cancel.isCancelled()
+                      || active != session;
                 }
-              }
+              },
+              cancel);
+        } catch (InterruptedIOException interrupted) {
+          boolean wasPreempted;
+          synchronized (LOCK) {
+            wasPreempted = session.preempted && !session.stopAll && active == session;
+            session.preempted = false;
+            session.current = null;
+            session.itemCancel = null;
+          }
+          if (wasPreempted) continue; // 우선 열기 책이 앞으로 끼어들어 현재 책은 대기열에 보존됨
+          throw interrupted;
+        }
 
-              public boolean cancelled() {
-                return !session.running || session.cancel.isCancelled() || active != session;
-              }
-            },
-            session.cancel);
-
-        completed++;
-        session.completedCount = completed;
-        pendingRefresh = true;
-        Listener l = listener;
-        if (l != null && active == session) l.onDownloadBookSaved(session.id, t.bookId);
+        boolean openNow;
+        synchronized (LOCK) {
+          session.completedCount++;
+          session.current = null;
+          session.itemCancel = null;
+          openNow = session.openBookId > 0 && t.bookId == session.openBookId;
+          if (openNow) session.openBookId = 0L;
+        }
+        notifyBookSaved(session, t, openNow);
       }
 
-      if (active != session || !session.running || session.cancel.isCancelled()) return;
-      session.running = false;
-      active = null;
+      boolean wasActive;
+      int completed;
+      long openId;
+      boolean batch;
+      synchronized (LOCK) {
+        wasActive = (active == session && !session.stopAll);
+        session.running = false;
+        if (active == session) active = null;
+        completed = session.completedCount;
+        openId = session.openBookId;
+        batch = session.batchMode;
+      }
+      if (!wasActive) return;
       pendingRefresh = true;
       DownloadService svc = instance;
       if (svc != null) svc.stopForegroundClean();
 
       Listener l = listener;
       if (l != null) {
-        l.onDownloadFinished(session.id, session.openBookId, completed, session.batch);
+        l.onDownloadFinished(session.id, openId, completed, batch);
       } else {
-        session.completedInBackground = true;
-        if (!session.batch && session.openBookId > 0) pendingOpenBookId = session.openBookId;
+        if (!batch && openId > 0) pendingOpenBookId = openId;
         postCompletionNotification(appCtx, session, completed);
       }
     } catch (Exception e) {
-      boolean wasActive = (active == session);
-      session.running = false;
-      if (wasActive) active = null;
+      boolean wasActive;
+      boolean batch;
+      synchronized (LOCK) {
+        wasActive = (active == session);
+        batch = session.batchMode;
+        session.running = false;
+        session.current = null;
+        session.itemCancel = null;
+        if (wasActive) active = null;
+      }
       DownloadService svc = instance;
       if (svc != null && active == null) svc.stopForegroundClean();
       Listener l = listener;
       if (e instanceof InterruptedIOException) {
         if (l != null && wasActive) l.onDownloadCancelled(session.id);
       } else {
-        if (l != null && wasActive) l.onDownloadFailed(session.id, e, session.batch);
+        if (l != null && wasActive) l.onDownloadFailed(session.id, e, batch);
         else if (wasActive) postFailureNotification(appCtx, session, Library.reason(e));
       }
+    }
+  }
+
+  private static void notifyBookSaved(Session session, Target t, boolean openNow) {
+    pendingRefresh = true;
+    Listener l = listener;
+    if (l != null && active == session) {
+      l.onDownloadBookSaved(session.id, t.bookId, openNow);
+    } else if (openNow) {
+      pendingOpenBookId = t.bookId;
     }
   }
 
@@ -326,13 +565,11 @@ public final class DownloadService extends Service {
       ensureChannel(ctx);
       NotificationManager nm = (NotificationManager) ctx.getSystemService(NOTIFICATION_SERVICE);
       if (nm == null) return;
-      String title = s.batch ? "미리 받기 완료" : "다운로드 완료";
+      String title = s.batchMode ? "미리 받기 완료" : "다운로드 완료";
       String body =
-          s.batch && completed > 1
+          completed > 1
               ? completed + "개 파일을 휴대폰 보관함에 저장했습니다."
-              : (s.targets.isEmpty() || s.targets.get(0).title.isEmpty()
-                  ? "휴대폰 보관함에 저장했습니다. 눌러서 바로 읽으세요."
-                  : s.targets.get(0).title + " · 눌러서 바로 읽으세요.");
+              : "휴대폰 보관함에 저장했습니다. 눌러서 바로 읽으세요.";
       Notification n =
           new Notification.Builder(ctx, CHANNEL_ID)
               .setSmallIcon(R.drawable.icon_remote)
